@@ -1,0 +1,7 @@
+﻿node_modules/
+backend/backend/node_modules/
+.vs/
+coverage/
+db/trips.sqlite
+
+backend/backend/add-admin.js
