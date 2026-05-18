@@ -1,88 +1,28 @@
 {
-  "name": "tripmap1",
-  "private": true,
-  "version": "0.0.0",
-  "type": "commonjs",
+  "name": "backend",
+  "version": "1.0.0",
+  "main": "server.js",
   "scripts": {
-<<<<<<< HEAD
-    "dev": "vite",
-    "build": "vite build",
-    "lint": "eslint .",
-    "preview": "vite preview",
-    "test": "vitest",
-    "test:coverage": "vitest run --coverage"
-  },
-  "dependencies": {
-    "@apollo/client": "^4.1.9",
-    "framer-motion": "^12.38.0",
-    "graphql": "^16.13.2",
-    "js-cookie": "^3.0.5",
-    "lucide-react": "^1.7.0",
-    "mongoose": "^9.6.2",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "recharts": "^3.8.1",
-    "socket.io-client": "^4.8.3"
-  },
-  "devDependencies": {
-    "@eslint/js": "^9.39.4",
-    "@playwright/test": "^1.58.2",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@types/jest": "^30.0.0",
-    "@types/node": "^25.5.0",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.1",
-    "@vitest/coverage-v8": "^4.1.2",
-    "eslint": "^9.39.4",
-    "eslint-plugin-react-hooks": "^7.0.1",
-    "eslint-plugin-react-refresh": "^0.5.2",
-    "globals": "^17.4.0",
-    "jsdom": "^29.0.1",
-    "vite": "^8.0.1",
-    "vitest": "^4.1.2"
-  },
-  "description": "This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.",
-  "main": "eslint.config.js",
-  "directories": {
-    "test": "tests"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC"
-}
-=======
-    "prestart": "npm install",
     "start": "node server.js",
-    "test": "node tests/db.test.js",
-    "migrate": "npx sequelize-cli db:migrate",
-    "seed": "npx sequelize-cli db:seed:all",
-    "migrate:undo": "npx sequelize-cli db:migrate:undo:all"
+    "dev": "nodemon server.js",
+    "test": "jest challenge.test.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "@faker-js/faker": "^10.4.0",
     "apollo-server-express": "^3.13.0",
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^4.18.2",
-    "graphql": "^16.13.2",
-    "mongoose": "^9.6.2",
-    "pg": "^8.20.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "graphql": "^16.8.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.3.4",
+    "pg": "^8.11.5",
     "pg-hstore": "^2.3.4",
-    "sequelize": "^6.37.8",
-    "sequelize-cli": "^6.6.5",
-    "socket.io": "^4.8.3",
-    "socket.io-client": "^4.8.3",
-    "sqlite3": "^6.0.1"
+    "sequelize": "^6.37.3",
+    "socket.io": "^4.7.5",
+    "sqlite3": "^5.1.7"
   },
   "devDependencies": {
-    "jest": "^30.4.2",
-    "supertest": "^7.2.2"
+    "jest": "^30.4.2"
   }
 }
->>>>>>> ba9e281a (add register functionality)

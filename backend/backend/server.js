@@ -35,29 +35,6 @@ const sequelize = process.env.NODE_ENV === 'production'
 
 // ─────────────────────────────────────────────
 // 2.  MONGODB SETUP (Mongoose - NoSQL for Chat)
-<<<<<<< HEAD
-// ─────────────────────────────────────────────
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://dariaabrudan1_db_user:NUkRsTK43VD8dNZi@cluster0.emvcr7r.mongodb.net/tripmap_chat?appName=Cluster0';
-
-mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ MongoDB connected (Chat)'))
-    .catch(err => console.error('❌ MongoDB error:', err));
-
-// MongoDB Schema for Chat Messages (NoSQL - no fixed schema)
-const MessageSchema = new mongoose.Schema({
-    username: { type: String, required: true },
-    role: { type: String, default: 'user' },
-    text: { type: String, required: true },
-    room: { type: String, default: 'general' },
-    createdAt: { type: Date, default: Date.now },
-});
-
-const Message = mongoose.model('Message', MessageSchema);
-
-// ─────────────────────────────────────────────
-// 3.  POSTGRESQL MODELS (Sequelize ORM)
-=======
->>>>>>> ba9e281a (add register functionality)
 // ─────────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://dariaabrudan1_db_user:NUkRsTK43VD8dNZi@cluster0.emvcr7r.mongodb.net/tripmap_chat?appName=Cluster0';
 
@@ -76,7 +53,7 @@ const MessageSchema = new mongoose.Schema({
 const Message = mongoose.model('Message', MessageSchema);
 
 // ─────────────────────────────────────────────
-// 3.  POSTGRESQL MODELS
+// 3.  POSTGRESQL MODELS (GOLD ENHANCED)
 // ─────────────────────────────────────────────
 const Role = sequelize.define('Role', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
@@ -95,71 +72,18 @@ const RolePermission = sequelize.define('RolePermission', {
 
 const User = sequelize.define('User', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    username: { type: DataTypes.STRING(100), allowNull: false, unique: true },
+    username: { type: DataTypes.STRING(100), allowNull: false, unique: true, validate: { len: [3, 100] } },
     password: { type: DataTypes.STRING(255), allowNull: false },
     roleId: { type: DataTypes.INTEGER, allowNull: false, references: { model: 'roles', key: 'id' } },
+    isSuspicious: { type: DataTypes.BOOLEAN, defaultValue: false }, // GOLD List
 }, { tableName: 'users', timestamps: true });
 
-<<<<<<< HEAD
-/** Role – admin or user */
-const Role = sequelize.define('Role', {
-    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    name: {
-        type: DataTypes.STRING(50),
-        allowNull: false,
-        unique: true,
-    },
-}, { tableName: 'roles', timestamps: false });
-
-/** Permission – what actions are allowed */
-const Permission = sequelize.define('Permission', {
-    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    name: {
-        type: DataTypes.STRING(100),
-        allowNull: false,
-        unique: true,
-    },
-}, { tableName: 'permissions', timestamps: false });
-
-/** RolePermission – junction table */
-const RolePermission = sequelize.define('RolePermission', {
-    roleId: { type: DataTypes.INTEGER, references: { model: 'roles', key: 'id' } },
-    permissionId: { type: DataTypes.INTEGER, references: { model: 'permissions', key: 'id' } },
-}, { tableName: 'role_permissions', timestamps: false });
-
-/** User – belongs to a role */
-const User = sequelize.define('User', {
-    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
-    username: {
-        type: DataTypes.STRING(100),
-        allowNull: false,
-        unique: true,
-        validate: { len: [3, 100] },
-    },
-    password: {
-        type: DataTypes.STRING(255),
-        allowNull: false,
-    },
-    roleId: {
-        type: DataTypes.INTEGER,
-        allowNull: false,
-        references: { model: 'roles', key: 'id' },
-    },
-}, { tableName: 'users', timestamps: true });
-
-/** Destination */
-=======
->>>>>>> ba9e281a (add register functionality)
 const Destination = sequelize.define('Destination', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     city: { type: DataTypes.STRING(100), allowNull: false, unique: true, validate: { len: [2, 100] } },
     country: { type: DataTypes.STRING(100), allowNull: true },
 }, { tableName: 'destinations', timestamps: true });
 
-<<<<<<< HEAD
-/** Trip */
-=======
->>>>>>> ba9e281a (add register functionality)
 const Trip = sequelize.define('Trip', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     price: { type: DataTypes.FLOAT, allowNull: false, validate: { min: 0 } },
@@ -167,6 +91,15 @@ const Trip = sequelize.define('Trip', {
     description: { type: DataTypes.TEXT, allowNull: true },
     destinationId: { type: DataTypes.INTEGER, allowNull: false, references: { model: 'destinations', key: 'id' } },
 }, { tableName: 'trips', timestamps: true });
+
+// ── GOLD AUDIT LOG MODEL ──
+const AuditLog = sequelize.define('AuditLog', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    userId: { type: DataTypes.STRING, allowNull: false },
+    role: { type: DataTypes.STRING, allowNull: false },
+    action: { type: DataTypes.TEXT, allowNull: false },
+    timestamp: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
+}, { tableName: 'audit_logs', timestamps: false });
 
 // Associations
 Role.belongsToMany(Permission, { through: RolePermission, foreignKey: 'roleId', as: 'permissions' });
@@ -176,28 +109,55 @@ Role.hasMany(User, { foreignKey: 'roleId', as: 'users' });
 Destination.hasMany(Trip, { foreignKey: 'destinationId', as: 'trips' });
 Trip.belongsTo(Destination, { foreignKey: 'destinationId', as: 'destination' });
 
+// ── GOLD LOGIC ENGINE: SYSTEM INTRUSION DETECTOR ──
+async function logAction(userIdentifier, role, actionDescription) {
+    try {
+        await AuditLog.create({
+            userId: String(userIdentifier),
+            role: role,
+            action: actionDescription
+        });
+
+        // Verificăm atacuri de tip Flood sau comportament malițios (mai mult de 3 acțiuni în ultimele 10 secunde)
+        const tenSecondsAgo = new Date(Date.now() - 10000);
+        const recentActionsCount = await AuditLog.count({
+            where: {
+                userId: String(userIdentifier),
+                timestamp: { [Op.gte]: tenSecondsAgo }
+            }
+        });
+
+        if (recentActionsCount > 3) {
+            // Prindem utilizatorul indiferent dacă logarea s-a făcut după Username sau după ID numeric
+            await User.update(
+                { isSuspicious: true },
+                {
+                    where: {
+                        [Op.or]: [
+                            { id: isNaN(userIdentifier) ? -1 : Number(userIdentifier) },
+                            { username: String(userIdentifier) }
+                        ]
+                    }
+                }
+            );
+            console.log(`⚠️ STEALTH DETECTOR: User '${userIdentifier}' flagged as SUSPICIOUS (Flood detected)`);
+        }
+    } catch (err) {
+        console.error('Audit log error:', err);
+    }
+}
+
 // ─────────────────────────────────────────────
-<<<<<<< HEAD
 // 4.  DATABASE MIGRATION + SEED
-=======
-// 4.  MIGRATION + SEED
->>>>>>> ba9e281a (add register functionality)
 // ─────────────────────────────────────────────
 async function migrate() {
     await sequelize.authenticate();
+    // Păstrăm force: true DOAR o tură ca să re-creăm tabela audit_logs pe curat.
     await sequelize.sync({ force: false });
 
-<<<<<<< HEAD
-    // Seed Roles
     const [adminRole] = await Role.findOrCreate({ where: { name: 'admin' } });
     const [userRole] = await Role.findOrCreate({ where: { name: 'user' } });
 
-    // Seed Permissions
-=======
-    const [adminRole] = await Role.findOrCreate({ where: { name: 'admin' } });
-    const [userRole] = await Role.findOrCreate({ where: { name: 'user' } });
-
->>>>>>> ba9e281a (add register functionality)
     const permNames = ['create_trip', 'edit_trip', 'delete_trip', 'view_trips', 'manage_users'];
     const perms = {};
     for (const name of permNames) {
@@ -205,29 +165,15 @@ async function migrate() {
         perms[name] = p;
     }
 
-<<<<<<< HEAD
-    // Admin gets all permissions
-    await adminRole.setPermissions(Object.values(perms));
-
-    // User gets only view
-    await userRole.setPermissions([perms['view_trips']]);
-
-    // Seed Users
-=======
     await adminRole.setPermissions(Object.values(perms));
     await userRole.setPermissions([perms['view_trips']]);
 
->>>>>>> ba9e281a (add register functionality)
     const adminCount = await User.count({ where: { roleId: adminRole.id } });
     if (adminCount === 0) {
         await User.create({ username: 'admin', password: 'admin123', roleId: adminRole.id });
         await User.create({ username: 'user1', password: 'user123', roleId: userRole.id });
     }
 
-<<<<<<< HEAD
-    // Seed Destinations & Trips
-=======
->>>>>>> ba9e281a (add register functionality)
     const tripCount = await Trip.count();
     if (tripCount === 0) {
         const paris = await Destination.create({ city: 'Paris', country: 'France' });
@@ -236,7 +182,7 @@ async function migrate() {
         await Trip.create({ price: 3800, days: 10, description: 'Tradiție și tehnologie.', destinationId: tokyo.id });
     }
 
-    console.log('✅ Database migrated and seeded');
+    console.log('✅ Database migrated, seeded and Gold Audit active.');
 }
 
 // ─────────────────────────────────────────────
@@ -253,7 +199,7 @@ const toGql = (trip) => ({
 const include = [{ model: Destination, as: 'destination' }];
 
 // ─────────────────────────────────────────────
-// 6.  EXPRESS + SOCKET.IO
+// 6.  EXPRESS + SOCKET.IO + REST ENDPOINTS
 // ─────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
@@ -262,11 +208,7 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(cors());
 app.use(express.json());
 
-<<<<<<< HEAD
-// REST - Login (Silver)
-=======
 // REST - Login
->>>>>>> ba9e281a (add register functionality)
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     const user = await User.findOne({
@@ -274,6 +216,10 @@ app.post('/api/login', async (req, res) => {
         include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
     });
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    // GOLD Log
+    await logAction(user.username, user.role.name, `User logged into the platform via REST`);
+
     res.json({
         id: user.id,
         username: user.username,
@@ -282,9 +228,7 @@ app.post('/api/login', async (req, res) => {
     });
 });
 
-<<<<<<< HEAD
-=======
-// REST - Register (Silver+)
+// REST - Register
 app.post('/api/register', async (req, res) => {
     const { username, password } = req.body;
     if (!username || username.length < 3) return res.status(400).json({ error: 'Username too short (min 3 chars)' });
@@ -296,11 +240,38 @@ app.post('/api/register', async (req, res) => {
     const userRole = await Role.findOne({ where: { name: 'user' } });
     const newUser = await User.create({ username, password, roleId: userRole.id });
 
+    // GOLD Log
+    await logAction(newUser.username, 'user', `Account successfully registered`);
+
     res.json({ id: newUser.id, username: newUser.username, role: 'user' });
 });
 
->>>>>>> ba9e281a (add register functionality)
-// REST - Get Users (admin only)
+// REST - GOLD STEALTH OBSERVATION LIST FOR ADMIN
+app.get('/api/admin/suspicious', async (req, res) => {
+    try {
+        const suspiciousUsers = await User.findAll({
+            where: { isSuspicious: true },
+            attributes: ['id', 'username', 'updatedAt']
+        });
+        res.json(suspiciousUsers);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// REST - NEW ROUTE FOR FRONTEND VISUAL AUDIT TRAILS PANEL
+app.get('/api/admin/audit-logs', async (req, res) => {
+    try {
+        const logs = await AuditLog.findAll({
+            order: [['timestamp', 'DESC']],
+            limit: 100
+        });
+        res.json(logs);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/users', async (req, res) => {
     const users = await User.findAll({
         include: [{ model: Role, as: 'role' }],
@@ -309,7 +280,6 @@ app.get('/api/users', async (req, res) => {
     res.json(users.map(u => ({ id: u.id, username: u.username, role: u.role.name })));
 });
 
-// REST - Chat history
 app.get('/api/chat/:room', async (req, res) => {
     const messages = await Message.find({ room: req.params.room })
         .sort({ createdAt: -1 })
@@ -317,11 +287,6 @@ app.get('/api/chat/:room', async (req, res) => {
     res.json(messages.reverse());
 });
 
-<<<<<<< HEAD
-// REST fallback
-=======
-// REST - Trips
->>>>>>> ba9e281a (add register functionality)
 app.get('/api/trips', async (req, res) => {
     const trips = await Trip.findAll({ include });
     res.json(trips.map(toGql));
@@ -355,16 +320,9 @@ app.get('/api/trips/filter', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-<<<<<<< HEAD
-// 7.  SOCKET.IO - Real-Time Chat (Silver)
+// 7.  SOCKET.IO - Real-Time Chat + GOLD Logging
 // ─────────────────────────────────────────────
 io.on('connection', (socket) => {
-    // Join a chat room
-=======
-// 7.  SOCKET.IO - Real-Time Chat (MongoDB)
-// ─────────────────────────────────────────────
-io.on('connection', (socket) => {
->>>>>>> ba9e281a (add register functionality)
     socket.on('joinRoom', ({ username, room }) => {
         socket.join(room);
         socket.to(room).emit('chatMessage', {
@@ -375,23 +333,14 @@ io.on('connection', (socket) => {
         });
     });
 
-<<<<<<< HEAD
-    // Send a chat message
-    socket.on('sendMessage', async ({ username, role, text, room }) => {
-        const msg = new Message({ username, role, text, room });
-        await msg.save();
-        io.to(room).emit('chatMessage', {
-            username,
-            role,
-            text,
-            createdAt: msg.createdAt,
-        });
-=======
-    socket.on('sendMessage', async ({ username, role, text, room }) => {
+    socket.on('sendMessage', async ({ username, role, text, room, userId }) => {
         const msg = new Message({ username, role, text, room });
         await msg.save();
         io.to(room).emit('chatMessage', { username, role, text, createdAt: msg.createdAt });
->>>>>>> ba9e281a (add register functionality)
+
+        // Căutăm utilizatorul hibrid: după numele de utilizator (trimis de websocket)
+        const userIdentifier = username || userId || 'unknown';
+        await logAction(userIdentifier, role || 'user', `Sent live chat message: "${text.substring(0, 30)}..."`);
     });
 
     socket.on('tripsUpdated', () => io.emit('tripsUpdated'));
@@ -426,6 +375,7 @@ const typeDefs = gql`
     username: String!
     role: String!
     permissions: [String]!
+    isSuspicious: Boolean
   }
 
   type Query {
@@ -471,15 +421,7 @@ const resolvers = {
                 order: [['createdAt', 'DESC']],
                 distinct: true,
             });
-<<<<<<< HEAD
-            return {
-                total: count,
-                totalPages: Math.ceil(count / LIMIT) || 1,
-                data: rows.map(toGql),
-            };
-=======
             return { total: count, totalPages: Math.ceil(count / LIMIT) || 1, data: rows.map(toGql) };
->>>>>>> ba9e281a (add register functionality)
         },
 
         getStats: async () => {
@@ -491,15 +433,7 @@ const resolvers = {
                 ],
                 raw: true,
             });
-<<<<<<< HEAD
-            return {
-                avgPrice: parseFloat(result?.avgPrice) || 0,
-                maxPrice: parseFloat(result?.maxPrice) || 0,
-                totalTrips: total,
-            };
-=======
             return { avgPrice: parseFloat(result?.avgPrice) || 0, maxPrice: parseFloat(result?.maxPrice) || 0, totalTrips: total };
->>>>>>> ba9e281a (add register functionality)
         },
 
         ping: () => 'pong',
@@ -513,6 +447,7 @@ const resolvers = {
                 username: u.username,
                 role: u.role.name,
                 permissions: u.role.permissions.map(p => p.name),
+                isSuspicious: u.isSuspicious
             }));
         },
     },
@@ -524,11 +459,16 @@ const resolvers = {
                 include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
             });
             if (!user) throw new Error('Invalid credentials');
+
+            // GOLD Log via GraphQL
+            await logAction(user.username, user.role.name, `User logged in via GraphQL`);
+
             return {
                 id: String(user.id),
                 username: user.username,
                 role: user.role.name,
                 permissions: user.role.permissions.map(p => p.name),
+                isSuspicious: user.isSuspicious
             };
         },
 
@@ -536,21 +476,8 @@ const resolvers = {
             if (!dest || dest.trim().length < 2) throw new Error('Destination name too short.');
             if (price < 0) throw new Error('Price cannot be negative.');
             if (days < 1) throw new Error('Duration must be at least 1 day.');
-<<<<<<< HEAD
-            const [destination] = await Destination.findOrCreate({
-                where: { city: dest.trim() },
-                defaults: { city: dest.trim() },
-            });
-            const trip = await Trip.create({
-                price: Number(price),
-                days: Number(days),
-                description: desc || '',
-                destinationId: destination.id,
-            });
-=======
             const [destination] = await Destination.findOrCreate({ where: { city: dest.trim() }, defaults: { city: dest.trim() } });
             const trip = await Trip.create({ price: Number(price), days: Number(days), description: desc || '', destinationId: destination.id });
->>>>>>> ba9e281a (add register functionality)
             io.emit('tripsUpdated');
             return toGql({ ...trip.toJSON(), destination });
         },
@@ -559,14 +486,7 @@ const resolvers = {
             const trip = await Trip.findByPk(id, { include });
             if (!trip) throw new Error('Trip not found');
             if (price < 0) throw new Error('Price cannot be negative.');
-<<<<<<< HEAD
-            const [destination] = await Destination.findOrCreate({
-                where: { city: dest.trim() },
-                defaults: { city: dest.trim() },
-            });
-=======
             const [destination] = await Destination.findOrCreate({ where: { city: dest.trim() }, defaults: { city: dest.trim() } });
->>>>>>> ba9e281a (add register functionality)
             await trip.update({ price: Number(price), days: Number(days), description: desc || '', destinationId: destination.id });
             await trip.reload({ include });
             io.emit('tripsUpdated');
@@ -612,7 +532,7 @@ async function start() {
     await apollo.start();
     apollo.applyMiddleware({ app, path: '/graphql' });
     const PORT = process.env.PORT || 5000;
-    server.listen(PORT, () => console.log(`🚀 Server ready on port ${PORT}`));
+    server.listen(PORT, () => console.log(`🚀 Gold Server ready on port ${PORT}`));
 }
 
 start().catch(console.error);
