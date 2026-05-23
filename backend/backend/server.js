@@ -113,21 +113,54 @@ Role.hasMany(User, { foreignKey: 'roleId', as: 'users' });
 Destination.hasMany(Trip, { foreignKey: 'destinationId', as: 'trips' });
 Trip.belongsTo(Destination, { foreignKey: 'destinationId', as: 'destination' });
 
+// Instanțiere timpurie a Serverului Socket.io pentru a fi accesibil în funcția de detecție
+let io;
+
+// Funcție pentru monitorizarea acțiunilor suspecte în timp real
 async function logAction(userIdentifier, role, actionDescription) {
     try {
         await AuditLog.create({ userId: String(userIdentifier), role: role, action: actionDescription });
-    } catch (err) { console.error('Audit log error:', err); }
+
+        // Dacă acțiunea este făcută de un user normal, verificăm frecvența cererilor
+        if (role !== 'admin') {
+            const tenSecondsAgo = new Date(Date.now() - 10000);
+            const recentActionsCount = await AuditLog.count({
+                where: { userId: String(userIdentifier), timestamp: { [Op.gte]: tenSecondsAgo } }
+            });
+
+            // Dacă face mai mult de 3 modificări/cereri în 10 secunde, îl marcăm suspect
+            if (recentActionsCount > 3) {
+                await User.update({ isSuspicious: true }, { where: { username: String(userIdentifier) } });
+                console.log(`⚠️ STEALTH DETECTOR: Utilizatorul '${userIdentifier}' a fost marcat ca SUSPICiOS!`);
+
+                // Trimitem alertă instant către frontend prin WebSocket pentru actualizarea panoului
+                if (io) {
+                    io.emit('userSuspicious', { username: userIdentifier, isSuspicious: true });
+                    io.emit('usersUpdated');
+                }
+            }
+        }
+    } catch (err) { console.error('Eroare adăugare jurnal audit:', err); }
+}
+
+// Helper funcție de decodare și validare token JWT pentru protecția rutei GraphQL
+function getUserFromToken(authHeader) {
+    if (!authHeader) return null;
+    try {
+        const token = authHeader.replace('Bearer ', '');
+        return jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+        return null;
+    }
 }
 
 // ─────────────────────────────────────────────
-// 4.  DATABASE MIGRATION & BULK SEED (FIXED LOGIN)
+// 4.  DATABASE MIGRATION & BULK SEED
 // ─────────────────────────────────────────────
 async function migrate() {
     await sequelize.authenticate();
-    // Schimbat temporar în false, dar ne asigurăm că reconstruim userii corect
     await sequelize.sync({ force: false });
 
-    // 1. Ne asigurăm că rolurile există și luăm ID-urile lor reale din baza de date
     const [adminRole] = await Role.findOrCreate({ where: { name: 'admin' } });
     const [userRole] = await Role.findOrCreate({ where: { name: 'user' } });
 
@@ -141,7 +174,7 @@ async function migrate() {
     await adminRole.setPermissions(Object.values(perms));
     await userRole.setPermissions([perms['view_trips']]);
 
-    // FIX CRITIC LOGIN: Ștergem și re-creăm utilizatorul admin pentru a fi siguri de hash-ul parolei
+    // Resincronizăm conturile standard la fiecare pornire curată
     await User.destroy({ where: { username: 'admin' } });
     await User.destroy({ where: { username: 'user1' } });
 
@@ -151,7 +184,6 @@ async function migrate() {
     await User.create({ username: 'admin', password: hashedAdminPassword, roleId: adminRole.id });
     await User.create({ username: 'user1', password: hashedUserPassword, roleId: userRole.id });
 
-    // Seed destinații standard dacă nu există
     const tripCount = await Trip.count();
     if (tripCount === 0) {
         const paris = await Destination.create({ city: 'Paris', country: 'France' });
@@ -160,7 +192,7 @@ async function migrate() {
         await Trip.create({ price: 3800, days: 10, description: 'Tradiție și tehnologie.', destinationId: tokyo.id });
     }
 
-    console.log(' FORCE RESET: Conturile "admin" (parolă: admin123) și "user1" (parolă: user123) au fost resincronizate nativ!');
+    console.log('✅ Baza de date Postgres sincronizată: Modulul Admin și Politicile View-Only sunt active.');
 }
 
 const toGql = (trip) => ({
@@ -180,7 +212,7 @@ const app = express();
 
 const corsOptions = {
     origin: function (origin, callback) {
-        return callback(null, true); // Permite absolut orice origin (Vercel, Localhost, IP LAN)
+        return callback(null, true);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -190,30 +222,28 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// REST - Login Engine cu validare îmbunătățită
+// REST - Endpoints
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
-        if (!username || !password) {
-            return res.status(400).json({ error: 'Username and password are required' });
-        }
+        if (!username || !password) return res.status(400).json({ error: 'Sunt necesare utilizatorul și parola' });
 
         const user = await User.findOne({
             where: { username: username.trim() },
             include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
         });
 
-        if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!user) return res.status(401).json({ error: 'Date de autentificare invalide' });
 
         const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!isMatch) return res.status(401).json({ error: 'Date de autentificare invalide' });
 
         const token = jwt.sign(
             { id: user.id, username: user.username, role: user.role.name, permissions: user.role.permissions.map(p => p.name) },
             JWT_SECRET, { expiresIn: '2h' }
         );
 
-        await logAction(user.username, user.role.name, `User logged into REST platform`);
+        await logAction(user.username, user.role.name, `Utilizatorul s-a conectat la platformă`);
 
         res.json({
             token,
@@ -241,21 +271,11 @@ app.get('/api/trips', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// 6.  SERVER CONFIGURATION (PORT PIPING)
+// 6.  SERVER INSTANTIATION
 // ─────────────────────────────────────────────
-let server;
-const certPath = path.join(__dirname, 'cert.pem');
-const keyPath = path.join(__dirname, 'key.pem');
+let server = http.createServer(app);
 
-if (process.env.NODE_ENV === 'production') {
-    server = http.createServer(app);
-} else if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
-    server = https.createServer({ key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }, app);
-} else {
-    server = http.createServer(app);
-}
-
-const io = new Server(server, {
+io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"], credentials: true }
 });
 
@@ -269,7 +289,7 @@ io.on('connection', (socket) => {
 });
 
 // ─────────────────────────────────────────────
-// 7.  GRAPHQL SCHEMA & RESOLVERS
+// 7.  GRAPHQL SCHEMA & RESOLVERS WITH ROLE VALIDATION
 // ─────────────────────────────────────────────
 const typeDefs = gql`
   type Trip { id: ID! dest: String! price: Float! days: Int! desc: String }
@@ -282,7 +302,8 @@ const typeDefs = gql`
 
 const resolvers = {
     Query: {
-        getTrips: async (_, { page = 1, city, minPrice, maxPrice }) => {
+        getTrips: async (_, { page = 1, city, minPrice, maxPrice }, { user }) => {
+            if (user) await logAction(user.username, user.role, `A interogat lista de călătorii (Pagina ${page})`);
             const LIMIT = 5; const offset = (page - 1) * LIMIT; const tripWhere = {};
             if (minPrice != null && minPrice !== '') tripWhere.price = { ...tripWhere.price, [Op.gte]: Number(minPrice) };
             if (maxPrice != null && maxPrice !== '') tripWhere.price = { ...tripWhere.price, [Op.lte]: Number(maxPrice) };
@@ -296,7 +317,11 @@ const resolvers = {
             return { avgPrice: parseFloat(result?.avgPrice) || 0, maxPrice: parseFloat(result?.maxPrice) || 0, totalTrips: total };
         },
         ping: () => 'pong',
-        getUsers: async () => {
+        getUsers: async (_, __, { user }) => {
+            // Doar adminul poate interoga panoul de utilizatori suspecți
+            if (!user || user.role !== 'admin') {
+                throw new Error('Acces neautorizat. Doar administratorii pot vedea acest panou.');
+            }
             const users = await User.findAll({ include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }] });
             return users.map(u => ({ id: String(u.id), username: u.username, role: u.role.name, permissions: u.role.permissions.map(p => p.name), isSuspicious: u.isSuspicious }));
         }
@@ -304,38 +329,72 @@ const resolvers = {
     Mutation: {
         login: async (_, { username, password }) => {
             const user = await User.findOne({ where: { username: username.trim() }, include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }] });
-            if (!user) throw new Error('Invalid credentials');
+            if (!user) throw new Error('Date de autentificare invalide');
             const isMatch = await bcrypt.compare(password, user.password);
-            if (!isMatch) throw new Error('Invalid credentials');
+            if (!isMatch) throw new Error('Date de autentificare invalide');
             const token = jwt.sign({ id: user.id, username: user.username, role: user.role.name }, JWT_SECRET, { expiresIn: '2h' });
             return { id: String(user.id), username: user.username, role: user.role.name, permissions: user.role.permissions.map(p => p.name), isSuspicious: user.isSuspicious, token };
         },
-        addTrip: async (_, { dest, price, days, desc }) => {
+        addTrip: async (_, { dest, price, days, desc }, { user }) => {
+            // VERIFICARE CRITICĂ: View Only pentru non-admini
+            if (!user || user.role !== 'admin') {
+                if (user) await logAction(user.username, user.role, `⚠️ TENTATIVĂ BLOCATĂ: Adăugare destinație fără drepturi`);
+                throw new Error('Permisiune refuzată: Contul tău este View-Only!');
+            }
+
             const [destination] = await Destination.findOrCreate({ where: { city: dest.trim() } });
             const trip = await Trip.create({ price: Number(price), days: Number(days), description: desc || '', destinationId: destination.id });
-            io.emit('tripsUpdated'); return toGql({ ...trip.toJSON(), destination });
+
+            await logAction(user.username, user.role, `A adăugat o nouă călătorie către ${dest}`);
+            io.emit('tripsUpdated');
+            return toGql({ ...trip.toJSON(), destination });
         },
-        updateTrip: async (_, { id, dest, price, days, desc }) => {
-            const trip = await Trip.findByPk(id, { include }); if (!trip) throw new Error('Trip not found');
+        updateTrip: async (_, { id, dest, price, days, desc }, { user }) => {
+            // VERIFICARE CRITICĂ: View Only pentru non-admini
+            if (!user || user.role !== 'admin') {
+                if (user) await logAction(user.username, user.role, `⚠️ TENTATIVĂ BLOCATĂ: Modificare destinație fără drepturi`);
+                throw new Error('Permisiune refuzată: Contul tău este View-Only!');
+            }
+
+            const trip = await Trip.findByPk(id, { include }); if (!trip) throw new Error('Călătoria nu a fost găsită');
             const [destination] = await Destination.findOrCreate({ where: { city: dest.trim() } });
             await trip.update({ price: Number(price), days: Number(days), description: desc || '', destinationId: destination.id });
-            io.emit('tripsUpdated'); return toGql(trip);
+
+            await logAction(user.username, user.role, `A modificat călătoria ID ${id}`);
+            io.emit('tripsUpdated');
+            return toGql(trip);
         },
-        deleteTrip: async (_, { id }) => {
-            const n = await Trip.destroy({ where: { id } }); io.emit('tripsUpdated'); return n > 0;
+        deleteTrip: async (_, { id }, { user }) => {
+            // VERIFICARE CRITICĂ: View Only pentru non-admini
+            if (!user || user.role !== 'admin') {
+                if (user) await logAction(user.username, user.role, `⚠️ TENTATIVĂ BLOCATĂ: Ștergere destinație fără drepturi`);
+                throw new Error('Permisiune refuzată: Contul tău este View-Only!');
+            }
+
+            const n = await Trip.destroy({ where: { id } });
+            await logAction(user.username, user.role, `A șters călătoria ID ${id}`);
+            io.emit('tripsUpdated');
+            return n > 0;
         }
     }
 };
 
 // ─────────────────────────────────────────────
-// 8. APOLLO RUNTIME STARTUP
+// 8. APOLLO INITIALIZATION WITH CONTEXT PASSTHROUGH
 // ─────────────────────────────────────────────
 async function start() {
     await migrate();
     const apollo = new ApolloServer({
         typeDefs,
         resolvers,
-        introspection: true
+        introspection: true,
+        cache: "bounded",
+        // Injectăm userul decodat din token în contextul GraphQL pentru a-l verifica în mutations
+        context: ({ req }) => {
+            const tokenHeader = req.headers.authorization || '';
+            const user = getUserFromToken(tokenHeader);
+            return { user };
+        }
     });
     await apollo.start();
 
@@ -347,7 +406,7 @@ async function start() {
 
     const PORT = process.env.PORT || 5000;
     server.listen(PORT, () => {
-        console.log(`🚀 Production Core Online on Port ${PORT}`);
+        console.log(`🚀 API Infrastructure Online on Port ${PORT}`);
     });
 }
 
