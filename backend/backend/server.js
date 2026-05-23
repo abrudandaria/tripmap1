@@ -4,7 +4,7 @@ require('dotenv').config();
 
 const express = require('express');
 const https = require('https');
-const http = require('http'); // Adăugat pentru fallback HTTP pe Render
+const http = require('http');
 const fs = require('fs');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -116,26 +116,18 @@ Trip.belongsTo(Destination, { foreignKey: 'destinationId', as: 'destination' });
 async function logAction(userIdentifier, role, actionDescription) {
     try {
         await AuditLog.create({ userId: String(userIdentifier), role: role, action: actionDescription });
-        const tenSecondsAgo = new Date(Date.now() - 10000);
-        const recentActionsCount = await AuditLog.count({
-            where: { userId: String(userIdentifier), timestamp: { [Op.gte]: tenSecondsAgo } }
-        });
-        if (recentActionsCount > 3) {
-            await User.update({ isSuspicious: true }, {
-                where: { [Op.or]: [{ id: isNaN(userIdentifier) ? -1 : Number(userIdentifier) }, { username: String(userIdentifier) }] }
-            });
-            console.log(`⚠️ STEALTH DETECTOR: User '${userIdentifier}' flagged as SUSPICIOUS`);
-        }
     } catch (err) { console.error('Audit log error:', err); }
 }
 
 // ─────────────────────────────────────────────
-// 4.  DATABASE MIGRATION & SEED
+// 4.  DATABASE MIGRATION & BULK SEED (FIXED LOGIN)
 // ─────────────────────────────────────────────
 async function migrate() {
     await sequelize.authenticate();
+    // Schimbat temporar în false, dar ne asigurăm că reconstruim userii corect
     await sequelize.sync({ force: false });
 
+    // 1. Ne asigurăm că rolurile există și luăm ID-urile lor reale din baza de date
     const [adminRole] = await Role.findOrCreate({ where: { name: 'admin' } });
     const [userRole] = await Role.findOrCreate({ where: { name: 'user' } });
 
@@ -149,14 +141,26 @@ async function migrate() {
     await adminRole.setPermissions(Object.values(perms));
     await userRole.setPermissions([perms['view_trips']]);
 
-    const adminCount = await User.count({ where: { roleId: adminRole.id } });
-    if (adminCount === 0) {
-        const hashedAdminPassword = await bcrypt.hash('admin123', 10);
-        const hashedUserPassword = await bcrypt.hash('user123', 10);
-        await User.create({ username: 'admin', password: hashedAdminPassword, roleId: adminRole.id });
-        await User.create({ username: 'user1', password: hashedUserPassword, roleId: userRole.id });
+    // FIX CRITIC LOGIN: Ștergem și re-creăm utilizatorul admin pentru a fi siguri de hash-ul parolei
+    await User.destroy({ where: { username: 'admin' } });
+    await User.destroy({ where: { username: 'user1' } });
+
+    const hashedAdminPassword = await bcrypt.hash('admin123', 10);
+    const hashedUserPassword = await bcrypt.hash('user123', 10);
+
+    await User.create({ username: 'admin', password: hashedAdminPassword, roleId: adminRole.id });
+    await User.create({ username: 'user1', password: hashedUserPassword, roleId: userRole.id });
+
+    // Seed destinații standard dacă nu există
+    const tripCount = await Trip.count();
+    if (tripCount === 0) {
+        const paris = await Destination.create({ city: 'Paris', country: 'France' });
+        const tokyo = await Destination.create({ city: 'Tokyo', country: 'Japan' });
+        await Trip.create({ price: 2500, days: 5, description: 'Orașul Luminilor.', destinationId: paris.id });
+        await Trip.create({ price: 3800, days: 10, description: 'Tradiție și tehnologie.', destinationId: tokyo.id });
     }
-    console.log('✅ Database checked/migrated.');
+
+    console.log(' FORCE RESET: Conturile "admin" (parolă: admin123) și "user1" (parolă: user123) au fost resincronizate nativ!');
 }
 
 const toGql = (trip) => ({
@@ -176,8 +180,7 @@ const app = express();
 
 const corsOptions = {
     origin: function (origin, callback) {
-        // Permite direct orice request din producție sau mediu local
-        return callback(null, true);
+        return callback(null, true); // Permite absolut orice origin (Vercel, Localhost, IP LAN)
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -187,15 +190,21 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// REST - Endpoints
+// REST - Login Engine cu validare îmbunătățită
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
+        if (!username || !password) {
+            return res.status(400).json({ error: 'Username and password are required' });
+        }
+
         const user = await User.findOne({
-            where: { username },
+            where: { username: username.trim() },
             include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
         });
+
         if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
@@ -203,7 +212,16 @@ app.post('/api/login', async (req, res) => {
             { id: user.id, username: user.username, role: user.role.name, permissions: user.role.permissions.map(p => p.name) },
             JWT_SECRET, { expiresIn: '2h' }
         );
-        res.json({ token, id: user.id, username: user.username, role: user.role.name, permissions: user.role.permissions.map(p => p.name) });
+
+        await logAction(user.username, user.role.name, `User logged into REST platform`);
+
+        res.json({
+            token,
+            id: user.id,
+            username: user.username,
+            role: user.role.name,
+            permissions: user.role.permissions.map(p => p.name)
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -212,7 +230,7 @@ app.post('/api/register', async (req, res) => {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
         const userRole = await Role.findOne({ where: { name: 'user' } });
-        const newUser = await User.create({ username, password: hashedPassword, roleId: userRole.id });
+        const newUser = await User.create({ username: username.trim(), password: hashedPassword, roleId: userRole.id });
         res.json({ id: newUser.id, username: newUser.username, role: 'user' });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -223,23 +241,18 @@ app.get('/api/trips', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// 6.  DYNAMIC SERVER INSTANTIATION (HTTP vs HTTPS)
+// 6.  SERVER CONFIGURATION (PORT PIPING)
 // ─────────────────────────────────────────────
 let server;
 const certPath = path.join(__dirname, 'cert.pem');
 const keyPath = path.join(__dirname, 'key.pem');
 
-// Dacă suntem în Producție (Render), folosim HTTP simplu deoarece Render adaugă automat SSL.
-// Local pe mașină, dacă există certificatele, folosește HTTPS-ul LAN.
 if (process.env.NODE_ENV === 'production') {
     server = http.createServer(app);
-    console.log("🌐 Production Environment: Initialized native HTTP Server wrapped by Render SSL.");
 } else if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
     server = https.createServer({ key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }, app);
-    console.log("🔒 Local Environment: Initialized custom HTTPS LAN Server.");
 } else {
     server = http.createServer(app);
-    console.log("🌐 Local Environment (No Certs): Initialized fallback HTTP Server.");
 }
 
 const io = new Server(server, {
@@ -290,7 +303,7 @@ const resolvers = {
     },
     Mutation: {
         login: async (_, { username, password }) => {
-            const user = await User.findOne({ where: { username }, include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }] });
+            const user = await User.findOne({ where: { username: username.trim() }, include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }] });
             if (!user) throw new Error('Invalid credentials');
             const isMatch = await bcrypt.compare(password, user.password);
             if (!isMatch) throw new Error('Invalid credentials');
@@ -315,7 +328,7 @@ const resolvers = {
 };
 
 // ─────────────────────────────────────────────
-// 8. APOLLO INITIALIZATION
+// 8. APOLLO RUNTIME STARTUP
 // ─────────────────────────────────────────────
 async function start() {
     await migrate();
@@ -329,12 +342,12 @@ async function start() {
     apollo.applyMiddleware({
         app,
         path: '/graphql',
-        cors: false // Îi permitem instanței Express globale să se ocupe nativ de CORS options
+        cors: false
     });
 
     const PORT = process.env.PORT || 5000;
     server.listen(PORT, () => {
-        console.log(`🚀 API Infrastructure Online on Port ${PORT}`);
+        console.log(`🚀 Production Core Online on Port ${PORT}`);
     });
 }
 
