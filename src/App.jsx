@@ -3,7 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recha
 import { io } from 'socket.io-client';
 
 // Ajustare automată a URL-ului pentru lucrul local sau în rețea prin HTTPS
-const SERVER = import.meta.env.VITE_SERVER_URL || window.location.origin.replace("5173", "5000").replace("http://", "https://");
+const SERVER = "https://tripmap1.onrender.com";
 const socket = io(SERVER, { secure: true, rejectUnauthorized: false });
 
 const App = () => {
