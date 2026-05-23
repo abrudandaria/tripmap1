@@ -3,7 +3,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const https = require('https'); // Modificat din http în https pentru cerința HTTPS
+const https = require('https'); // Folosit pentru cerința HTTPS locală
 const fs = require('fs');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -169,7 +169,6 @@ async function migrate() {
 
     const adminCount = await User.count({ where: { roleId: adminRole.id } });
     if (adminCount === 0) {
-        // Criptăm parolele implicite la crearea bazei de date (Cerinta: Secure Login)
         const hashedAdminPassword = await bcrypt.hash('admin123', 10);
         const hashedUserPassword = await bcrypt.hash('user123', 10);
 
@@ -199,11 +198,33 @@ const toGql = (trip) => ({
 const include = [{ model: Destination, as: 'destination' }];
 
 // ─────────────────────────────────────────────
-// 5.  EXPRESS & ENDPOINTS SETUP
+// 5.  EXPRESS & CORS SETUP
 // ─────────────────────────────────────────────
 const app = express();
 
-app.use(cors({ origin: '*', credentials: true }));
+// Lista explicită de origini pentru a evita erorile de tip CORS în producție și local
+const allowedOrigins = [
+    'http://localhost:5173',
+    'https://localhost:5173',
+    'https://tripmap1-ten.vercel.app' // Domeniul tău live de pe Vercel
+];
+
+const corsOptions = {
+    origin: function (origin, callback) {
+        // Permite cererile fără origin (cum sunt Postman, apeluri interne sau server-to-server)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+            return callback(null, true);
+        } else {
+            return callback(new Error('Blocked by CORS policy'), false);
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // REST - Secure Login cu Bcrypt și JWT Token Generator
@@ -217,11 +238,9 @@ app.post('/api/login', async (req, res) => {
 
         if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-        // Verificăm parola cu bcrypt
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-        // Generăm token JWT ce expiră la inactivitate sau după 2 ore max
         const token = jwt.sign(
             { id: user.id, username: user.username, role: user.role.name, permissions: user.role.permissions.map(p => p.name) },
             JWT_SECRET,
@@ -231,7 +250,7 @@ app.post('/api/login', async (req, res) => {
         await logAction(user.username, user.role.name, `User logged into the platform via secure REST with JWT token`);
 
         res.json({
-            token, // Returnăm tokenul generat către client
+            token,
             id: user.id,
             username: user.username,
             role: user.role.name,
@@ -252,7 +271,6 @@ app.post('/api/register', async (req, res) => {
         const existing = await User.findOne({ where: { username } });
         if (existing) return res.status(400).json({ error: 'Username already taken' });
 
-        // Criptăm parola înainte de a o salva în baza de date
         const hashedPassword = await bcrypt.hash(password, 10);
 
         const userRole = await Role.findOne({ where: { name: 'user' } });
@@ -308,7 +326,6 @@ app.get('/api/stats', async (req, res) => {
 // ─────────────────────────────────────────────
 // 6.  HTTPS SERVER INITIALIZATION (CERINȚĂ LAN)
 // ─────────────────────────────────────────────
-// Generăm sau căutăm cheile SSL pentru comunicarea securizată în rețea
 let serverOptions = {};
 const certPath = path.join(__dirname, 'cert.pem');
 const keyPath = path.join(__dirname, 'key.pem');
@@ -319,14 +336,17 @@ if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
         cert: fs.readFileSync(certPath)
     };
 } else {
-    // Fallback: Dacă nu ai generat un certificat manual, creăm unul de bază la pornire ca să ruleze obligatoriu prin HTTPS
     console.log("⚠️ Nu s-au găsit fișiere self-signed pem. Se folosește o configurare de urgență.");
-    // Pentru rulare 100% nativă la laborator, se recomandă folosirea utilitarului 'mkcert'
 }
 
-// Transformăm serverul din HTTP în HTTPS conform cerinței
 const server = https.createServer(serverOptions, app);
-const io = new Server(server, { cors: { origin: '*', methods: ["GET", "POST"] } });
+const io = new Server(server, {
+    cors: {
+        origin: allowedOrigins,
+        methods: ["GET", "POST"],
+        credentials: true
+    }
+});
 
 io.on('connection', (socket) => {
     socket.on('joinRoom', ({ username, room }) => {
@@ -421,7 +441,7 @@ const resolvers = {
                 { expiresIn: '2h' }
             );
 
-            await logAction(user.username, user.role.name, `User logged in via secured GraphQL GraphQL Auth Engine`);
+            await logAction(user.username, user.role.name, `User logged in via secured GraphQL Auth Engine`);
 
             return {
                 id: String(user.id),
@@ -477,10 +497,16 @@ async function start() {
     await migrate();
     const apollo = new ApolloServer({ typeDefs, resolvers });
     await apollo.start();
-    apollo.applyMiddleware({ app, path: '/graphql' });
+
+    // Corecția critică: Se aplică setările complete de CORS și pentru middleware-ul Apollo
+    apollo.applyMiddleware({
+        app,
+        path: '/graphql',
+        cors: corsOptions
+    });
+
     const PORT = process.env.PORT || 5000;
 
-    // Serverul ascultă securizat pe portul definit
     server.listen(PORT, '0.0.0.0', () => {
         console.log(`🚀 Secure HTTPS Gold Server ready on port ${PORT}`);
         console.log(`🌐 local LAN testing address enabled.`);
