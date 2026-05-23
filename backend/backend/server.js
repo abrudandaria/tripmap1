@@ -3,7 +3,8 @@
 require('dotenv').config();
 
 const express = require('express');
-const https = require('https'); // Folosit pentru cerința HTTPS locală
+const https = require('https');
+const http = require('http'); // Adăugat pentru fallback HTTP pe Render
 const fs = require('fs');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -11,8 +12,8 @@ const { ApolloServer, gql } = require('apollo-server-express');
 const { Sequelize, DataTypes, Op } = require('sequelize');
 const mongoose = require('mongoose');
 const path = require('path');
-const jwt = require('jsonwebtoken'); // Adăugat pentru Token Management
-const bcrypt = require('bcryptjs');  // Adăugat pentru Secure Login/Register
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_key_tripmap_2026';
 
@@ -39,7 +40,7 @@ const sequelize = process.env.NODE_ENV === 'production'
     });
 
 // ─────────────────────────────────────────────
-// 2.  MONGODB SETUP (Mongoose - NoSQL for Chat)
+// 2.  MONGODB SETUP (Mongoose)
 // ─────────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://dariaabrudan1_db_user:NUkRsTK43VD8dNZi@cluster0.emvcr7r.mongodb.net/tripmap_chat?appName=Cluster0';
 
@@ -114,41 +115,22 @@ Trip.belongsTo(Destination, { foreignKey: 'destinationId', as: 'destination' });
 
 async function logAction(userIdentifier, role, actionDescription) {
     try {
-        await AuditLog.create({
-            userId: String(userIdentifier),
-            role: role,
-            action: actionDescription
-        });
-
+        await AuditLog.create({ userId: String(userIdentifier), role: role, action: actionDescription });
         const tenSecondsAgo = new Date(Date.now() - 10000);
         const recentActionsCount = await AuditLog.count({
-            where: {
-                userId: String(userIdentifier),
-                timestamp: { [Op.gte]: tenSecondsAgo }
-            }
+            where: { userId: String(userIdentifier), timestamp: { [Op.gte]: tenSecondsAgo } }
         });
-
         if (recentActionsCount > 3) {
-            await User.update(
-                { isSuspicious: true },
-                {
-                    where: {
-                        [Op.or]: [
-                            { id: isNaN(userIdentifier) ? -1 : Number(userIdentifier) },
-                            { username: String(userIdentifier) }
-                        ]
-                    }
-                }
-            );
-            console.log(`⚠️ STEALTH DETECTOR: User '${userIdentifier}' flagged as SUSPICIOUS (Flood detected)`);
+            await User.update({ isSuspicious: true }, {
+                where: { [Op.or]: [{ id: isNaN(userIdentifier) ? -1 : Number(userIdentifier) }, { username: String(userIdentifier) }] }
+            });
+            console.log(`⚠️ STEALTH DETECTOR: User '${userIdentifier}' flagged as SUSPICIOUS`);
         }
-    } catch (err) {
-        console.error('Audit log error:', err);
-    }
+    } catch (err) { console.error('Audit log error:', err); }
 }
 
 // ─────────────────────────────────────────────
-// 4.  DATABASE MIGRATION + SEED
+// 4.  DATABASE MIGRATION & SEED
 // ─────────────────────────────────────────────
 async function migrate() {
     await sequelize.authenticate();
@@ -171,20 +153,10 @@ async function migrate() {
     if (adminCount === 0) {
         const hashedAdminPassword = await bcrypt.hash('admin123', 10);
         const hashedUserPassword = await bcrypt.hash('user123', 10);
-
         await User.create({ username: 'admin', password: hashedAdminPassword, roleId: adminRole.id });
         await User.create({ username: 'user1', password: hashedUserPassword, roleId: userRole.id });
     }
-
-    const tripCount = await Trip.count();
-    if (tripCount === 0) {
-        const paris = await Destination.create({ city: 'Paris', country: 'France' });
-        const tokyo = await Destination.create({ city: 'Tokyo', country: 'Japan' });
-        await Trip.create({ price: 2500, days: 5, description: 'Orașul Luminilor.', destinationId: paris.id });
-        await Trip.create({ price: 3800, days: 10, description: 'Tradiție și tehnologie.', destinationId: tokyo.id });
-    }
-
-    console.log('✅ Database migrated and secured with bcrypt.');
+    console.log('✅ Database checked/migrated.');
 }
 
 const toGql = (trip) => ({
@@ -198,36 +170,24 @@ const toGql = (trip) => ({
 const include = [{ model: Destination, as: 'destination' }];
 
 // ─────────────────────────────────────────────
-// 5.  EXPRESS & CORS SETUP
+// 5.  EXPRESS & GLOBAL CORS CONFIGURATION
 // ─────────────────────────────────────────────
 const app = express();
 
-// Lista explicită de origini pentru a evita erorile de tip CORS în producție și local
-const allowedOrigins = [
-    'http://localhost:5173',
-    'https://localhost:5173',
-    'https://tripmap1-ten.vercel.app' // Domeniul tău live de pe Vercel
-];
-
 const corsOptions = {
     origin: function (origin, callback) {
-        // Permite cererile fără origin (cum sunt Postman, apeluri interne sau server-to-server)
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
-            return callback(null, true);
-        } else {
-            return callback(new Error('Blocked by CORS policy'), false);
-        }
+        // Permite direct orice request din producție sau mediu local
+        return callback(null, true);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-requested-with']
 };
 
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// REST - Secure Login cu Bcrypt și JWT Token Generator
+// REST - Endpoints
 app.post('/api/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -235,78 +195,26 @@ app.post('/api/login', async (req, res) => {
             where: { username },
             include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
         });
-
         if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
         const token = jwt.sign(
             { id: user.id, username: user.username, role: user.role.name, permissions: user.role.permissions.map(p => p.name) },
-            JWT_SECRET,
-            { expiresIn: '2h' }
+            JWT_SECRET, { expiresIn: '2h' }
         );
-
-        await logAction(user.username, user.role.name, `User logged into the platform via secure REST with JWT token`);
-
-        res.json({
-            token,
-            id: user.id,
-            username: user.username,
-            role: user.role.name,
-            permissions: user.role.permissions.map(p => p.name),
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        res.json({ token, id: user.id, username: user.username, role: user.role.name, permissions: user.role.permissions.map(p => p.name) });
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// REST - Secure Register cu Bcrypt Hashing
 app.post('/api/register', async (req, res) => {
     try {
         const { username, password } = req.body;
-        if (!username || username.length < 3) return res.status(400).json({ error: 'Username too short (min 3 chars)' });
-        if (!password || password.length < 4) return res.status(400).json({ error: 'Password too short (min 4 chars)' });
-
-        const existing = await User.findOne({ where: { username } });
-        if (existing) return res.status(400).json({ error: 'Username already taken' });
-
         const hashedPassword = await bcrypt.hash(password, 10);
-
         const userRole = await Role.findOne({ where: { name: 'user' } });
         const newUser = await User.create({ username, password: hashedPassword, roleId: userRole.id });
-
-        await logAction(newUser.username, 'user', `Account securely registered with bcrypt`);
-
         res.json({ id: newUser.id, username: newUser.username, role: 'user' });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Rute Standard rămase active
-app.get('/api/admin/suspicious', async (req, res) => {
-    try {
-        const suspiciousUsers = await User.findAll({ where: { isSuspicious: true }, attributes: ['id', 'username', 'updatedAt'] });
-        res.json(suspiciousUsers);
     } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/admin/audit-logs', async (req, res) => {
-    try {
-        const logs = await AuditLog.findAll({ order: [['timestamp', 'DESC']], limit: 100 });
-        res.json(logs);
-    } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/users', async (req, res) => {
-    const users = await User.findAll({ include: [{ model: Role, as: 'role' }], attributes: ['id', 'username', 'createdAt'] });
-    res.json(users.map(u => ({ id: u.id, username: u.username, role: u.role.name })));
-});
-
-app.get('/api/chat/:room', async (req, res) => {
-    const messages = await Message.find({ room: req.params.room }).sort({ createdAt: -1 }).limit(50);
-    res.json(messages.reverse());
 });
 
 app.get('/api/trips', async (req, res) => {
@@ -314,60 +222,37 @@ app.get('/api/trips', async (req, res) => {
     res.json(trips.map(toGql));
 });
 
-app.get('/api/stats', async (req, res) => {
-    const total = await Trip.count();
-    const result = await Trip.findOne({
-        attributes: [[sequelize.fn('AVG', sequelize.col('price')), 'avgPrice'], [sequelize.fn('MAX', sequelize.col('price')), 'maxPrice']],
-        raw: true,
-    });
-    res.json({ totalTrips: total, avgPrice: result.avgPrice || 0, maxPrice: result.maxPrice || 0 });
-});
-
 // ─────────────────────────────────────────────
-// 6.  HTTPS SERVER INITIALIZATION (CERINȚĂ LAN)
+// 6.  DYNAMIC SERVER INSTANTIATION (HTTP vs HTTPS)
 // ─────────────────────────────────────────────
-let serverOptions = {};
+let server;
 const certPath = path.join(__dirname, 'cert.pem');
 const keyPath = path.join(__dirname, 'key.pem');
 
-if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
-    serverOptions = {
-        key: fs.readFileSync(keyPath),
-        cert: fs.readFileSync(certPath)
-    };
+// Dacă suntem în Producție (Render), folosim HTTP simplu deoarece Render adaugă automat SSL.
+// Local pe mașină, dacă există certificatele, folosește HTTPS-ul LAN.
+if (process.env.NODE_ENV === 'production') {
+    server = http.createServer(app);
+    console.log("🌐 Production Environment: Initialized native HTTP Server wrapped by Render SSL.");
+} else if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+    server = https.createServer({ key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }, app);
+    console.log("🔒 Local Environment: Initialized custom HTTPS LAN Server.");
 } else {
-    console.log("⚠️ Nu s-au găsit fișiere self-signed pem. Se folosește o configurare de urgență.");
+    server = http.createServer(app);
+    console.log("🌐 Local Environment (No Certs): Initialized fallback HTTP Server.");
 }
 
-const server = https.createServer(serverOptions, app);
 const io = new Server(server, {
-    cors: {
-        origin: allowedOrigins,
-        methods: ["GET", "POST"],
-        credentials: true
-    }
+    cors: { origin: "*", methods: ["GET", "POST"], credentials: true }
 });
 
 io.on('connection', (socket) => {
-    socket.on('joinRoom', ({ username, room }) => {
-        socket.join(room);
-        socket.to(room).emit('chatMessage', {
-            username: 'System',
-            text: `${username} joined the room`,
-            role: 'system',
-            createdAt: new Date(),
-        });
-    });
-
-    socket.on('sendMessage', async ({ username, role, text, room, userId }) => {
+    socket.on('joinRoom', ({ username, room }) => { socket.join(room); });
+    socket.on('sendMessage', async ({ username, role, text, room }) => {
         const msg = new Message({ username, role, text, room });
         await msg.save();
         io.to(room).emit('chatMessage', { username, role, text, createdAt: msg.createdAt });
-        const userIdentifier = username || userId || 'unknown';
-        await logAction(userIdentifier, role || 'user', `Sent live chat message: "${text.substring(0, 30)}..."`);
     });
-
-    socket.on('tripsUpdated', () => io.emit('tripsUpdated'));
 });
 
 // ─────────────────────────────────────────────
@@ -382,137 +267,77 @@ const typeDefs = gql`
   type Mutation { addTrip(dest: String!, price: Float!, days: Int!, desc: String): Trip \n updateTrip(id: ID!, dest: String!, price: Float!, days: Int!, desc: String): Trip \n deleteTrip(id: ID!): Boolean \n toggleGenerator(action: String!): String \n login(username: String!, password: String!): UserInfo }
 `;
 
-let generatorInterval = null;
-
 const resolvers = {
     Query: {
         getTrips: async (_, { page = 1, city, minPrice, maxPrice }) => {
-            const LIMIT = 5;
-            const offset = (page - 1) * LIMIT;
-            const tripWhere = {};
+            const LIMIT = 5; const offset = (page - 1) * LIMIT; const tripWhere = {};
             if (minPrice != null && minPrice !== '') tripWhere.price = { ...tripWhere.price, [Op.gte]: Number(minPrice) };
             if (maxPrice != null && maxPrice !== '') tripWhere.price = { ...tripWhere.price, [Op.lte]: Number(maxPrice) };
-            const destInclude = {
-                model: Destination,
-                as: 'destination',
-                required: city ? true : false,
-                ...(city ? { where: { city: { [Op.like]: `%${city}%` } } } : {}),
-            };
-            const { count, rows } = await Trip.findAndCountAll({
-                where: tripWhere,
-                include: [destInclude],
-                limit: LIMIT,
-                offset,
-                order: [['createdAt', 'DESC']],
-                distinct: true,
-            });
+            const destInclude = { model: Destination, as: 'destination', required: city ? true : false, ...(city ? { where: { city: { [Op.like]: `%${city}%` } } } : {}) };
+            const { count, rows } = await Trip.findAndCountAll({ where: tripWhere, include: [destInclude], limit: LIMIT, offset, order: [['createdAt', 'DESC']], distinct: true });
             return { total: count, totalPages: Math.ceil(count / LIMIT) || 1, data: rows.map(toGql) };
         },
         getStats: async () => {
             const total = await Trip.count();
-            const result = await Trip.findOne({
-                attributes: [[sequelize.fn('AVG', sequelize.col('price')), 'avgPrice'], [sequelize.fn('MAX', sequelize.col('price')), 'maxPrice']],
-                raw: true,
-            });
+            const result = await Trip.findOne({ attributes: [[sequelize.fn('AVG', sequelize.col('price')), 'avgPrice'], [sequelize.fn('MAX', sequelize.col('price')), 'maxPrice']], raw: true });
             return { avgPrice: parseFloat(result?.avgPrice) || 0, maxPrice: parseFloat(result?.maxPrice) || 0, totalTrips: total };
         },
         ping: () => 'pong',
         getUsers: async () => {
             const users = await User.findAll({ include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }] });
-            return users.map(u => ({
-                id: String(u.id), username: u.username, role: u.role.name, permissions: u.role.permissions.map(p => p.name), isSuspicious: u.isSuspicious
-            }));
-        },
+            return users.map(u => ({ id: String(u.id), username: u.username, role: u.role.name, permissions: u.role.permissions.map(p => p.name), isSuspicious: u.isSuspicious }));
+        }
     },
     Mutation: {
         login: async (_, { username, password }) => {
-            const user = await User.findOne({
-                where: { username },
-                include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
-            });
+            const user = await User.findOne({ where: { username }, include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }] });
             if (!user) throw new Error('Invalid credentials');
-
             const isMatch = await bcrypt.compare(password, user.password);
             if (!isMatch) throw new Error('Invalid credentials');
-
-            const token = jwt.sign(
-                { id: user.id, username: user.username, role: user.role.name },
-                JWT_SECRET,
-                { expiresIn: '2h' }
-            );
-
-            await logAction(user.username, user.role.name, `User logged in via secured GraphQL Auth Engine`);
-
-            return {
-                id: String(user.id),
-                username: user.username,
-                role: user.role.name,
-                permissions: user.role.permissions.map(p => p.name),
-                isSuspicious: user.isSuspicious,
-                token: token
-            };
+            const token = jwt.sign({ id: user.id, username: user.username, role: user.role.name }, JWT_SECRET, { expiresIn: '2h' });
+            return { id: String(user.id), username: user.username, role: user.role.name, permissions: user.role.permissions.map(p => p.name), isSuspicious: user.isSuspicious, token };
         },
         addTrip: async (_, { dest, price, days, desc }) => {
             const [destination] = await Destination.findOrCreate({ where: { city: dest.trim() } });
             const trip = await Trip.create({ price: Number(price), days: Number(days), description: desc || '', destinationId: destination.id });
-            io.emit('tripsUpdated');
-            return toGql({ ...trip.toJSON(), destination });
+            io.emit('tripsUpdated'); return toGql({ ...trip.toJSON(), destination });
         },
         updateTrip: async (_, { id, dest, price, days, desc }) => {
-            const trip = await Trip.findByPk(id, { include });
-            if (!trip) throw new Error('Trip not found');
+            const trip = await Trip.findByPk(id, { include }); if (!trip) throw new Error('Trip not found');
             const [destination] = await Destination.findOrCreate({ where: { city: dest.trim() } });
             await trip.update({ price: Number(price), days: Number(days), description: desc || '', destinationId: destination.id });
-            io.emit('tripsUpdated');
-            return toGql(trip);
+            io.emit('tripsUpdated'); return toGql(trip);
         },
         deleteTrip: async (_, { id }) => {
-            const n = await Trip.destroy({ where: { id } });
-            io.emit('tripsUpdated');
-            return n > 0;
-        },
-        toggleGenerator: (_, { action }) => {
-            if (action === 'start') {
-                if (generatorInterval) return 'Running';
-                generatorInterval = setInterval(async () => {
-                    const cities = ['Berlin', 'Rome', 'Barcelona', 'Amsterdam'];
-                    const city = cities[Math.floor(Math.random() * cities.length)] + ' ' + Date.now();
-                    const [dest] = await Destination.findOrCreate({ where: { city } });
-                    await Trip.create({ price: Math.floor(Math.random() * 5000), days: Math.floor(Math.random() * 14) + 1, description: 'Generated securely.', destinationId: dest.id });
-                    io.emit('tripsUpdated');
-                }, 3000);
-                return 'Started';
-            } else {
-                if (generatorInterval) { clearInterval(generatorInterval); generatorInterval = null; }
-                return 'Stopped';
-            }
+            const n = await Trip.destroy({ where: { id } }); io.emit('tripsUpdated'); return n > 0;
         }
     }
 };
 
 // ─────────────────────────────────────────────
-// 8. APOLLO STARTUP WITH HTTPS SUPPORT
+// 8. APOLLO INITIALIZATION
 // ─────────────────────────────────────────────
 async function start() {
     await migrate();
-    const apollo = new ApolloServer({ typeDefs, resolvers });
+    const apollo = new ApolloServer({
+        typeDefs,
+        resolvers,
+        introspection: true
+    });
     await apollo.start();
 
-    // Corecția critică: Se aplică setările complete de CORS și pentru middleware-ul Apollo
     apollo.applyMiddleware({
         app,
         path: '/graphql',
-        cors: corsOptions
+        cors: false // Îi permitem instanței Express globale să se ocupe nativ de CORS options
     });
 
     const PORT = process.env.PORT || 5000;
-
-    server.listen(PORT, '0.0.0.0', () => {
-        console.log(`🚀 Secure HTTPS Gold Server ready on port ${PORT}`);
-        console.log(`🌐 local LAN testing address enabled.`);
+    server.listen(PORT, () => {
+        console.log(`🚀 API Infrastructure Online on Port ${PORT}`);
     });
 }
 
 start().catch(console.error);
 
-module.exports = { app, sequelize, Trip, Destination, User, Role, Permission, Message, server };
+module.exports = { app, server };
