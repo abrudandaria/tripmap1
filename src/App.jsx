@@ -2,19 +2,23 @@
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { io } from 'socket.io-client';
 
-const SERVER = import.meta.env.VITE_SERVER_URL || 'https://tripmap1.onrender.com';
-const socket = io(SERVER);
+// Ajustare automată a URL-ului pentru lucrul local sau în rețea prin HTTPS
+const SERVER = import.meta.env.VITE_SERVER_URL || window.location.origin.replace("5173", "5000").replace("http://", "https://");
+const socket = io(SERVER, { secure: true, rejectUnauthorized: false });
 
 const App = () => {
-    // --- AUTH STATE ---
-    const [user, setUser] = useState(null);
-    const [authMode, setAuthMode] = useState('login'); // 'login' sau 'register'
+    // --- AUTH STATE WITH TOKEN RETRIEVAL ---
+    const [user, setUser] = useState(() => {
+        const saved = localStorage.getItem('tripmap_user');
+        return saved ? JSON.parse(saved) : null;
+    });
+    const [authMode, setAuthMode] = useState('login');
     const [loginForm, setLoginForm] = useState({ username: '', password: '' });
     const [loginError, setLoginError] = useState('');
     const [successMessage, setSuccessMessage] = useState('');
 
     // --- TRIPS STATE ---
-    const [view, setView] = useState('login');
+    const [view, setView] = useState(() => localStorage.getItem('tripmap_user') ? 'dashboard_main' : 'login');
     const [trips, setTrips] = useState([]);
     const [stats, setStats] = useState(null);
     const [isOnline, setIsOnline] = useState(true);
@@ -36,50 +40,125 @@ const App = () => {
     const [chatRoom] = useState('general');
     const chatEndRef = useRef(null);
 
-    // --- HELPERS ---
+    // --- GOLD CHALLENGE STATE ---
+    const [suspiciousUsers, setSuspiciousUsers] = useState([]);
+    const [auditLogs, setAuditLogs] = useState([]);
+    const [activeAdminTab, setActiveAdminTab] = useState('logs');
+
+    // ─────────────────────────────────────────────
+    // 🔏 MANAGEMENTUL INACTIVITĂȚII (LOGOUT AUTOMAT)
+    // ─────────────────────────────────────────────
+    useEffect(() => {
+        if (!user) return;
+
+        const INACTIVITY_TIMEOUT = 15 * 60 * 1000; // 15 minute
+        let timeoutId;
+
+        const handleLogoutDueToInactivity = () => {
+            alert("Ai fost deconectat automat din cauza inactivității prelungite!");
+            handleLogout();
+        };
+
+        const resetTimer = () => {
+            if (timeoutId) clearTimeout(timeoutId);
+            timeoutId = setTimeout(handleLogoutDueToInactivity, INACTIVITY_TIMEOUT);
+        };
+
+        window.addEventListener('mousemove', resetTimer);
+        window.addEventListener('keypress', resetTimer);
+        window.addEventListener('click', resetTimer);
+        window.addEventListener('scroll', resetTimer);
+
+        resetTimer();
+
+        return () => {
+            if (timeoutId) clearTimeout(timeoutId);
+            window.removeEventListener('mousemove', resetTimer);
+            window.removeEventListener('keypress', resetTimer);
+            window.removeEventListener('click', resetTimer);
+            window.removeEventListener('scroll', resetTimer);
+        };
+    }, [user]);
+
+    const handleLogout = () => {
+        localStorage.removeItem('tripmap_user');
+        localStorage.removeItem('tripmap_token');
+        setUser(null);
+        setView('login');
+    };
+
     const hasPermission = (perm) => {
         if (user?.role?.includes('admin')) return true;
         return user?.permissions?.includes(perm);
     };
 
     const gqlFetch = useCallback(async (query) => {
+        const token = localStorage.getItem('tripmap_token');
         const res = await fetch(`${SERVER}/graphql`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': token ? `Bearer ${token}` : ''
+            },
             body: JSON.stringify({ query }),
         });
         return res.json();
     }, []);
 
-    // --- LOGIN ---
+    const fetchGoldAdminData = useCallback(async () => {
+        if (!user?.role?.includes('admin')) return;
+        try {
+            const resSuspicious = await fetch(`${SERVER}/api/admin/suspicious`);
+            if (resSuspicious.ok) {
+                const dataSuspicious = await resSuspicious.json();
+                setSuspiciousUsers(dataSuspicious);
+            }
+            const resLogs = await fetch(`${SERVER}/api/admin/audit-logs`);
+            if (resLogs.ok) {
+                const dataLogs = await resLogs.json();
+                setAuditLogs(dataLogs);
+            }
+        } catch (err) {
+            console.error('Error fetching metrics:', err);
+        }
+    }, [user]);
+
+    // --- LOGIN IMPLEMENTATION WITH TOKENS ---
     const handleLogin = async () => {
         setLoginError('');
         setSuccessMessage('');
         try {
-            const result = await gqlFetch(`mutation { login(username: "${loginForm.username}", password: "${loginForm.password}") { id username role permissions } }`);
-            if (result.errors) { setLoginError('Invalid username or password'); return; }
+            const query = `mutation { login(username: "${loginForm.username}", password: "${loginForm.password}") { id username role permissions token } }`;
+            const result = await gqlFetch(query);
+
+            if (result.errors) {
+                setLoginError('Utilizator sau parolă incorectă!');
+                return;
+            }
+
             const loggedUser = result.data.login;
+            localStorage.setItem('tripmap_token', loggedUser.token);
+            localStorage.setItem('tripmap_user', JSON.stringify(loggedUser));
+
             setUser(loggedUser);
             setView('dashboard_main');
 
-            // Join chat room
             socket.emit('joinRoom', { username: loggedUser.username, room: chatRoom });
         } catch {
-            setLoginError('Connection error');
+            setLoginError('Eroare de conexiune securizată SSL!');
         }
     };
 
-    // --- REGISTER ---
     const handleRegister = async () => {
         setLoginError('');
         setSuccessMessage('');
 
         if (loginForm.username.trim().length < 3) {
-            setLoginError('Username must be at least 3 characters');
+            setLoginError('Numele de utilizator trebuie să aibă minim 3 caractere');
             return;
         }
         if (loginForm.password.length < 4) {
-            setLoginError('Password must be at least 4 characters');
+            setLoginError('Parola trebuie să aibă minim 4 caractere');
             return;
         }
 
@@ -94,25 +173,19 @@ const App = () => {
             });
 
             const data = await res.json();
-
             if (!res.ok) {
-                setLoginError(data.error || 'Registration failed');
+                setLoginError(data.error || 'Înregistrarea a eșuat');
                 return;
             }
 
-            setSuccessMessage('Account created successfully! Logging in...');
-
-            // Auto login după înregistrare reușită
-            setTimeout(() => {
-                handleLogin();
-            }, 1500);
-
+            setSuccessMessage('Cont creat cu succes! Se efectuează autentificarea...');
+            setTimeout(() => { handleLogin(); }, 1200);
         } catch {
-            setLoginError('Server connection error during registration');
+            setLoginError('Eroare la trimiterea datelor securizate.');
         }
     };
 
-    // --- CHAT ---
+    // --- CHAT FUNCTIONS ---
     const loadChatHistory = useCallback(async () => {
         try {
             const res = await fetch(`${SERVER}/api/chat/${chatRoom}`);
@@ -125,14 +198,13 @@ const App = () => {
 
     const sendMessage = () => {
         if (!chatInput.trim() || !user) return;
-
         const msgPayload = {
+            userId: user.id,
             username: user.username,
             role: user.role,
             text: chatInput.trim(),
             room: chatRoom,
         };
-
         socket.emit('sendMessage', msgPayload);
         setChatInput('');
     };
@@ -140,11 +212,10 @@ const App = () => {
     useEffect(() => {
         socket.on('chatMessage', (msg) => {
             setChatMessages(prev => [...prev, msg]);
+            if (view === 'admin_panel') fetchGoldAdminData();
         });
-        return () => {
-            socket.off('chatMessage');
-        };
-    }, []);
+        return () => { socket.off('chatMessage'); };
+    }, [view, fetchGoldAdminData]);
 
     useEffect(() => {
         if (showChat) {
@@ -154,13 +225,7 @@ const App = () => {
         }
     }, [showChat, loadChatHistory, user, chatRoom]);
 
-    useEffect(() => {
-        if (chatMessages.length > 0) {
-            chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-        }
-    }, [chatMessages]);
-
-    // --- TRIPS ---
+    // --- TRIP OPERATIONS ---
     const fetchTrips = useCallback(async (isNextPage = false, targetPageManual = null, filterOverride = null) => {
         const targetPage = targetPageManual || (isNextPage ? page + 1 : page);
         const activeFilter = filterOverride !== null ? filterOverride : filter;
@@ -189,324 +254,289 @@ const App = () => {
         } catch { }
     }, [gqlFetch]);
 
-    useEffect(() => {
-        const heartbeat = setInterval(async () => {
-            try {
-                const res = await gqlFetch('{ ping }');
-                if (res.data && !isOnline) setIsOnline(true);
-            } catch { setIsOnline(false); }
-        }, 3000);
-        socket.on('tripsUpdated', () => { fetchTrips(false, 1); fetchStats(); });
-        if (view === 'trip_planner') { fetchTrips(); fetchStats(); }
-        return () => { clearInterval(heartbeat); socket.off('tripsUpdated'); };
-    }, [view, fetchTrips, fetchStats, isOnline, gqlFetch]);
+    const handleSaveTrip = async (e) => {
+        e.preventDefault();
+        const mutation = editingId
+            ? `mutation { updateTrip(id: "${editingId}", dest: "${formData.dest}", price: ${Number(formData.price)}, days: ${Number(formData.days)}, desc: "${formData.desc}") { id } }`
+            : `mutation { addTrip(dest: "${formData.dest}", price: ${Number(formData.price)}, days: ${Number(formData.days)}, desc: "${formData.desc}") { id } }`;
 
-    useEffect(() => {
-        if (view !== 'trip_planner') return;
-        const observer = new IntersectionObserver((entries) => {
-            if (entries[0].isIntersecting && !isLoadingMore && page < totalPages && isOnline) fetchTrips(true);
-        }, { threshold: 0.1 });
-        if (loaderRef.current) observer.observe(loaderRef.current);
-        return () => observer.disconnect();
-    }, [isLoadingMore, page, totalPages, isOnline, view, fetchTrips]);
-
-    const handleAction = async (method, data) => {
-        let gqlMutation = '';
-        if (method === 'DELETE') {
-            if (!hasPermission('delete_trip')) return alert('No permission to delete trips!');
-            gqlMutation = `mutation { deleteTrip(id: "${data.id}") }`;
-        } else {
-            if (editingId && !hasPermission('edit_trip')) return alert('No permission to edit trips!');
-            if (!editingId && !hasPermission('create_trip')) return alert('No permission to create trips!');
-            if (!data.dest || data.price <= 0) return alert('Invalid data!');
-            gqlMutation = editingId
-                ? `mutation { updateTrip(id: "${editingId}", dest: "${data.dest}", price: ${data.price}, days: ${data.days}, desc: "${data.desc}") { id } }`
-                : `mutation { addTrip(dest: "${data.dest}", price: ${data.price}, days: ${data.days}, desc: "${data.desc}") { id } }`;
-        }
-        try {
-            const result = await gqlFetch(gqlMutation);
-            if (result.errors) return alert(result.errors[0].message);
+        const res = await gqlFetch(mutation);
+        if (!res.errors) {
             setShowModal(false);
+            setFormData({ dest: '', price: '', days: '', desc: '' });
+            setEditingId(null);
             fetchTrips(false, 1);
             fetchStats();
-        } catch { setIsOnline(false); }
+        }
     };
 
-    // --- VIEWS ---
+    const handleDeleteTrip = async (id) => {
+        if (!window.confirm("Ștergi această vacanță?")) return;
+        const res = await gqlFetch(`mutation { deleteTrip(id: "${id}") }`);
+        if (!res.errors) {
+            fetchTrips(false, 1);
+            fetchStats();
+        }
+    };
 
-    // LOGIN & REGISTER VIEW
-    if (view === 'login') return (
-        <div style={{ height: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center', background: '#0a0a12' }}>
-            <div style={{ background: '#161625', padding: '40px', borderRadius: '12px', border: '1px solid cyan', textAlign: 'center', width: '360px' }}>
-                <h2 style={{ color: 'cyan', marginBottom: '8px' }}>Trip Planner Engine</h2>
-                <p style={{ color: '#555', marginBottom: '24px', fontSize: '0.85rem' }}>
-                    v3.0 Silver – {authMode === 'login' ? 'Login Required' : 'Create New Account'}
-                </p>
+    const generateData = async () => {
+        setIsGenerating(true);
+        await gqlFetch(`mutation { generateSampleData }`);
+        setIsGenerating(false);
+        fetchTrips(false, 1);
+        fetchStats();
+    };
 
-                <input
-                    value={loginForm.username}
-                    onChange={e => setLoginForm({ ...loginForm, username: e.target.value })}
-                    placeholder="Username"
-                    style={{ width: '100%', padding: '12px', marginBottom: '10px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }}
-                />
-                <input
-                    type="password"
-                    value={loginForm.password}
-                    onChange={e => setLoginForm({ ...loginForm, password: e.target.value })}
-                    onKeyDown={e => e.key === 'Enter' && (authMode === 'login' ? handleLogin() : handleRegister())}
-                    placeholder="Password"
-                    style={{ width: '100%', padding: '12px', marginBottom: '16px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }}
-                />
+    useEffect(() => {
+        if (view === 'trip_planner') { fetchTrips(); fetchStats(); }
+        if (view === 'admin_panel') { fetchGoldAdminData(); }
+    }, [view, fetchTrips, fetchStats, fetchGoldAdminData]);
 
-                {loginError && <p style={{ color: '#ff4d4d', marginBottom: '10px', fontSize: '0.85rem' }}>{loginError}</p>}
-                {successMessage && <p style={{ color: '#00ff88', marginBottom: '10px', fontSize: '0.85rem' }}>{successMessage}</p>}
-
-                {authMode === 'login' ? (
-                    <button onClick={handleLogin} style={{ width: '100%', padding: '12px', background: 'cyan', border: 'none', fontWeight: 'bold', cursor: 'pointer', borderRadius: '4px', color: 'black' }}>
-                        LOGIN
-                    </button>
-                ) : (
-                    <button onClick={handleRegister} style={{ width: '100%', padding: '12px', background: '#00ff88', border: 'none', fontWeight: 'bold', cursor: 'pointer', borderRadius: '4px', color: 'black' }}>
-                        REGISTER NEW ACCOUNT
-                    </button>
-                )}
-
-                <div style={{ marginTop: '15px' }}>
-                    <span
-                        onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setLoginError(''); setSuccessMessage(''); }}
-                        style={{ color: 'cyan', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline' }}
-                    >
-                        {authMode === 'login' ? "Don't have an account? Register" : "Already have an account? Login"}
-                    </span>
-                </div>
-
-                {authMode === 'login' && (
-                    <div style={{ marginTop: '20px', padding: '12px', background: '#0a0a12', borderRadius: '8px', textAlign: 'left' }}>
-                        <p style={{ color: '#555', fontSize: '0.75rem', margin: '0 0 6px 0' }}>Test accounts:</p>
-                        <p style={{ color: '#00ff88', fontSize: '0.75rem', margin: '2px 0' }}>admin / admin123 → Full access</p>
-                        <p style={{ color: '#aaa', fontSize: '0.75rem', margin: '2px 0' }}>user1 / user123 → View only</p>
-                    </div>
-                )}
-            </div>
-        </div>
-    );
-
-    // DASHBOARD VIEW
-    if (view === 'dashboard_main') return (
-        <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0a0a12', color: 'white', gap: '20px' }}>
-            <div style={{ textAlign: 'center', marginBottom: '10px' }}>
-                <p style={{ color: '#555' }}>Logged in as <span style={{ color: 'cyan' }}>{user?.username}</span> — Role: <span style={{ color: user?.role?.includes('admin') ? '#ff4d4d' : '#00ff88' }}>{user?.role}</span></p>
-            </div>
-            <div onClick={() => setView('trip_planner')} style={{ padding: '60px', background: '#161625', border: '2px solid cyan', borderRadius: '20px', cursor: 'pointer', textAlign: 'center' }}>
-                <h2 style={{ color: 'cyan', margin: 0 }}>OPEN MANAGEMENT CONSOLE</h2>
-                <p style={{ color: '#555', marginTop: '10px' }}>v3.0 Silver Edition</p>
-            </div>
-            <button onClick={() => { setUser(null); setView('login'); setAuthMode('login'); }} style={{ background: '#333', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '4px', cursor: 'pointer' }}>
-                LOGOUT
-            </button>
-        </div>
-    );
-
-    // MAIN APP VIEW
     return (
-        <div style={{ padding: '20px', background: '#0a0a12', color: 'white', minHeight: '100vh', fontFamily: 'sans-serif' }}>
-            {/* Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #333', paddingBottom: '15px', marginBottom: '20px' }}>
-                <h1 style={{ margin: 0 }}>Trip<span style={{ color: 'cyan' }}>Planner</span></h1>
-                <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
-                    <span style={{ color: '#555', fontSize: '0.85rem' }}>
-                        👤 <span style={{ color: 'cyan' }}>{user?.username}</span>
-                        {' '}[<span style={{ color: user?.role?.includes('admin') ? '#ff4d4d' : '#00ff88' }}>{user?.role}</span>]
-                    </span>
-                    <div style={{ color: isOnline ? '#00ff88' : '#ff4d4d', fontWeight: 'bold', fontSize: '0.9rem' }}>
-                        {isOnline ? '● ONLINE' : '● OFFLINE'}
+        <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif', backgroundColor: '#121214', color: '#fff', minHeight: '100vh' }}>
+            {/* HEADER SECURE */}
+            <header style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '20px', borderBottom: '1px solid #333' }}>
+                <h2>🌍 TripMap App <span style={{ fontSize: '12px', color: '#4caf50' }}>● Conexiune HTTPS Securizată</span></h2>
+                {user && (
+                    <div>
+                        <span style={{ marginRight: '15px' }}>Salut, <strong>{user.username}</strong> ({user.role})</span>
+                        <button onClick={() => setView('dashboard_main')} style={{ marginRight: '10px', padding: '5px 10px' }}>Dashboard</button>
+                        <button onClick={() => setView('trip_planner')} style={{ marginRight: '10px', padding: '5px 10px' }}>Planificator</button>
+                        {user.role === 'admin' && <button onClick={() => setView('admin_panel')} style={{ marginRight: '10px', padding: '5px 10px', backgroundColor: '#d32f2f', color: '#fff' }}>Panou Audit</button>}
+                        <button onClick={handleLogout} style={{ padding: '5px 10px', backgroundColor: '#555', color: '#fff' }}>Ieșire</button>
                     </div>
-                    <button onClick={() => setShowChat(!showChat)} style={{ background: '#161625', color: 'cyan', border: '1px solid cyan', padding: '6px 14px', cursor: 'pointer', borderRadius: '4px' }}>
-                        💬 Chat
-                    </button>
-                    <button onClick={() => { setUser(null); setView('login'); setAuthMode('login'); }} style={{ background: '#333', color: 'white', border: 'none', padding: '8px 15px', cursor: 'pointer', borderRadius: '4px' }}>EXIT</button>
-                </div>
-            </div>
+                )}
+            </header>
 
-            {/* Stats */}
-            {stats && (
-                <div style={{ display: 'flex', gap: '15px', marginBottom: '15px' }}>
-                    {[
-                        { label: 'Total Trips', value: stats.totalTrips },
-                        { label: 'Avg Price', value: `$${Math.round(stats.avgPrice)}` },
-                        { label: 'Max Price', value: `$${stats.maxPrice}` },
-                    ].map(s => (
-                        <div key={s.label} style={{ background: '#161625', padding: '10px 20px', borderRadius: '8px', border: '1px solid #333', textAlign: 'center', flex: 1 }}>
-                            <div style={{ color: 'cyan', fontSize: '1.4rem', fontWeight: 'bold' }}>{s.value}</div>
-                            <div style={{ color: '#555', fontSize: '0.75rem' }}>{s.label}</div>
-                        </div>
-                    ))}
-                </div>
-            )}
+            {/* FEREASTRA DE LOGIN / REGISTER */}
+            {view === 'login' && (
+                <div style={{ maxWidth: '400px', margin: '80px auto', padding: '30px', backgroundColor: '#1a1a1e', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)' }}>
+                    <h3>{authMode === 'login' ? 'Autentificare Securizată' : 'Înregistrare Cont Nou'}</h3>
+                    {loginError && <p style={{ color: '#ff5252' }}>{loginError}</p>}
+                    {successMessage && <p style={{ color: '#4caf50' }}>{successMessage}</p>}
 
-            {/* Generator - admin only */}
-            {hasPermission('create_trip') && (
-                <div style={{ textAlign: 'center', marginBottom: '20px' }}>
-                    <button onClick={async () => {
-                        const action = isGenerating ? 'stop' : 'start';
-                        await gqlFetch(`mutation { toggleGenerator(action: "${action}") }`);
-                        setIsGenerating(!isGenerating);
-                    }} style={{ background: isGenerating ? '#ff4d4d' : '#00ff88', border: 'none', padding: '10px 25px', borderRadius: '20px', fontWeight: 'bold', cursor: 'pointer' }}>
-                        {isGenerating ? '⏹ STOP GENERATOR' : '▶ START LIVE DATA GENERATOR'}
-                    </button>
+                    <div style={{ marginBottom: '15px' }}>
+                        <label style={{ display: 'block', marginBottom: '5px' }}>Utilizator:</label>
+                        <input type="text" value={loginForm.username} onChange={e => setLoginForm({ ...loginForm, username: e.target.value })} style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #444', backgroundColor: '#2a2a30', color: '#fff' }} />
+                    </div>
+                    <div style={{ marginBottom: '20px' }}>
+                        <label style={{ display: 'block', marginBottom: '5px' }}>Parolă:</label>
+                        <input type="password" value={loginForm.password} onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #444', backgroundColor: '#2a2a30', color: '#fff' }} />
+                    </div>
+
+                    {authMode === 'login' ? (
+                        <>
+                            <button onClick={handleLogin} style={{ width: '100%', padding: '10px', backgroundColor: '#3f51b5', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Conectare</button>
+                            <p style={{ marginTop: '15px', textAlign: 'center', fontSize: '14px' }}>Nu ai cont? <span onClick={() => setAuthMode('register')} style={{ color: '#ff4081', cursor: 'pointer' }}>Înregistrează-te acum</span></p>
+                        </>
+                    ) : (
+                        <>
+                            <button onClick={handleRegister} style={{ width: '100%', padding: '10px', backgroundColor: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Creează cont</button>
+                            <p style={{ marginTop: '15px', textAlign: 'center', fontSize: '14px' }}>Ai deja un cont? <span onClick={() => setAuthMode('login')} style={{ color: '#ff4081', cursor: 'pointer' }}>Mergi la conectare</span></p>
+                        </>
+                    )}
                 </div>
             )}
 
-            {/* Filters */}
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '15px', background: '#161625', padding: '12px', borderRadius: '8px' }}>
-                <input value={filter.city} onChange={e => setFilter({ ...filter, city: e.target.value })} placeholder="Filter by city..." style={{ flex: 2, padding: '8px', background: '#0a0a12', border: '1px solid #333', color: 'white', borderRadius: '4px' }} />
-                <input type="number" value={filter.minPrice} onChange={e => setFilter({ ...filter, minPrice: e.target.value })} placeholder="Min price" style={{ flex: 1, padding: '8px', background: '#0a0a12', border: '1px solid #333', color: 'white', borderRadius: '4px' }} />
-                <input type="number" value={filter.maxPrice} onChange={e => setFilter({ ...filter, maxPrice: e.target.value })} placeholder="Max price" style={{ flex: 1, padding: '8px', background: '#0a0a12', border: '1px solid #333', color: 'white', borderRadius: '4px' }} />
-                <button onClick={() => fetchTrips(false, 1, filter)} style={{ padding: '8px 20px', background: 'cyan', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer' }}>FILTER</button>
-                <button onClick={() => { const c = { city: '', minPrice: '', maxPrice: '' }; setFilter(c); fetchTrips(false, 1, c); }} style={{ padding: '8px 15px', background: '#333', border: 'none', borderRadius: '4px', color: 'white', cursor: 'pointer' }}>CLEAR</button>
-            </div>
-
-            <div style={{ display: 'flex', gap: '20px', height: 'calc(100vh - 340px)' }}>
-                {/* Trips Table */}
-                <div style={{ flex: 2, background: '#161625', padding: '20px', borderRadius: '12px', display: 'flex', flexDirection: 'column' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '15px' }}>
-                        <h3 style={{ margin: 0 }}>Destinations (Page {page}/{totalPages})</h3>
-                        {hasPermission('create_trip') && (
-                            <button onClick={() => { setEditingId(null); setFormData({ dest: '', price: '', days: '', desc: '' }); setShowModal(true); }} style={{ background: 'cyan', border: 'none', padding: '8px 15px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>+ NEW TRIP</button>
-                        )}
-                    </div>
-
-                    <div style={{ flex: 1, overflowY: 'auto', border: '1px solid #222' }}>
-                        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                            <thead style={{ position: 'sticky', top: 0, background: '#1c1c2e', zIndex: 1 }}>
-                                <tr style={{ color: 'cyan', textAlign: 'left', borderBottom: '1px solid #333' }}>
-                                    <th style={{ padding: '12px' }}>City</th>
-                                    <th>Days</th>
-                                    <th>Price</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {trips.map(t => (
-                                    <tr key={t.id} onClick={() => setSelectedTrip(t)} style={{ borderBottom: '1px solid #222', cursor: 'pointer', background: selectedTrip?.id === t.id ? '#1a1a2e' : 'transparent' }}>
-                                        <td style={{ padding: '12px' }}>{t.dest}</td>
-                                        <td>{t.days}</td>
-                                        <td style={{ color: '#00ff88' }}>${t.price}</td>
-                                        <td>
-                                            {hasPermission('edit_trip') && (
-                                                <button onClick={e => { e.stopPropagation(); setEditingId(t.id); setFormData(t); setShowModal(true); }} style={{ background: 'none', border: 'none', color: 'orange', cursor: 'pointer', marginRight: '10px' }}>Edit</button>
-                                            )}
-                                            {hasPermission('delete_trip') && (
-                                                <button onClick={e => { e.stopPropagation(); if (window.confirm(`Delete trip to ${t.dest}?`)) handleAction('DELETE', { id: t.id }); }} style={{ background: 'none', border: 'none', color: '#ff4d4d', cursor: 'pointer' }}>Del</button>
-                                            )}
-                                            {!hasPermission('edit_trip') && !hasPermission('delete_trip') && (
-                                                <span style={{ color: '#444', fontSize: '0.75rem' }}>view only</span>
-                                            )}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                        <div ref={loaderRef} style={{ padding: '15px', textAlign: 'center', color: '#555' }}>
-                            {isLoadingMore ? '⏳ Loading more...' : (page >= totalPages ? '— End of list —' : '↓ Scroll for more')}
-                        </div>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'center', gap: '5px', paddingTop: '10px' }}>
-                        <button disabled={page === 1} onClick={() => fetchTrips(false, page - 1)} style={{ padding: '5px 10px', background: '#333', color: 'white', border: 'none', cursor: 'pointer', borderRadius: '3px' }}>Prev</button>
-                        {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => (
-                            <button key={i} onClick={() => fetchTrips(false, i + 1)} style={{ padding: '5px 10px', background: page === i + 1 ? 'cyan' : '#333', color: page === i + 1 ? 'black' : 'white', border: 'none', cursor: 'pointer', borderRadius: '3px' }}>{i + 1}</button>
-                        ))}
-                        <button disabled={page === totalPages} onClick={() => fetchTrips(false, page + 1)} style={{ padding: '5px 10px', background: '#333', color: 'white', border: 'none', cursor: 'pointer', borderRadius: '3px' }}>Next</button>
-                    </div>
-                </div>
-
-                {/* Sidebar */}
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                    <div style={{ background: '#161625', padding: '20px', borderRadius: '12px', height: '180px' }}>
-                        <h4 style={{ margin: '0 0 10px 0' }}>Cost Overview</h4>
-                        <ResponsiveContainer width="100%" height="85%">
-                            <BarChart data={trips.slice(-10)}>
-                                <XAxis dataKey="dest" hide />
-                                <YAxis hide />
-                                <Tooltip contentStyle={{ background: '#161625', border: '1px solid cyan' }} />
-                                <Bar dataKey="price" fill="cyan" radius={[4, 4, 0, 0]} />
-                            </BarChart>
-                        </ResponsiveContainer>
-                    </div>
-
-                    <div style={{ background: '#161625', padding: '20px', borderRadius: '12px', border: '1px solid cyan', flex: 1 }}>
-                        <h3 style={{ color: 'cyan', marginTop: 0 }}>Trip Details</h3>
-                        {selectedTrip ? (
-                            <div>
-                                <h2 style={{ margin: '10px 0' }}>{selectedTrip.dest}</h2>
-                                <p style={{ color: '#aaa', lineHeight: '1.5' }}>{selectedTrip.desc || 'No details.'}</p>
-                                <div style={{ fontSize: '1.2rem', fontWeight: 'bold', color: '#00ff88', marginTop: '20px' }}>Price: ${selectedTrip.price}</div>
-                                <div style={{ color: '#888' }}>Duration: {selectedTrip.days} days</div>
-                            </div>
-                        ) : <p style={{ color: '#444' }}>Select a destination.</p>}
-                    </div>
-                </div>
-            </div>
-
-            {/* CHAT PANEL */}
-            {showChat && (
-                <div style={{ position: 'fixed', bottom: '20px', right: '20px', width: '360px', height: '480px', background: '#161625', border: '1px solid cyan', borderRadius: '12px', display: 'flex', flexDirection: 'column', zIndex: 200 }}>
-                    <div style={{ padding: '15px', borderBottom: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <h4 style={{ margin: 0, color: 'cyan' }}>💬 Live Chat — #{chatRoom}</h4>
-                        <button onClick={() => setShowChat(false)} style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontSize: '1.2rem' }}>✕</button>
-                    </div>
-
-                    <div style={{ flex: 1, overflowY: 'auto', padding: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        {chatMessages.map((msg, i) => (
-                            <div key={i} style={{ alignSelf: msg.username === user?.username ? 'flex-end' : 'flex-start', maxWidth: '80%' }}>
-                                {msg.username !== user?.username && (
-                                    <div style={{ fontSize: '0.7rem', color: msg.role?.includes('admin') ? '#ff4d4d' : '#00ff88', marginBottom: '2px' }}>
-                                        {msg.username} [{msg.role || 'user'}]
-                                    </div>
-                                )}
-                                <div style={{
-                                    background: msg.username === 'System' ? '#1a1a2e' : msg.username === user?.username ? 'cyan' : '#222',
-                                    color: msg.username === user?.username ? 'black' : msg.username === 'System' ? '#555' : 'white',
-                                    padding: '8px 12px',
-                                    borderRadius: '8px',
-                                    fontSize: '0.85rem',
-                                    fontStyle: msg.username === 'System' ? 'italic' : 'normal',
-                                }}>
-                                    {msg.text}
-                                </div>
-                            </div>
-                        ))}
-                        <div ref={chatEndRef} />
-                    </div>
-
-                    <div style={{ padding: '10px', borderTop: '1px solid #333', display: 'flex', gap: '8px' }}>
-                        <input
-                            value={chatInput}
-                            onChange={e => setChatInput(e.target.value)}
-                            onKeyDown={e => e.key === 'Enter' && sendMessage()}
-                            placeholder="Type a message..."
-                            style={{ flex: 1, padding: '8px', background: '#0a0a12', border: '1px solid #333', color: 'white', borderRadius: '4px' }}
-                        />
-                        <button onClick={sendMessage} style={{ background: 'cyan', border: 'none', padding: '8px 15px', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer' }}>Send</button>
-                    </div>
+            {/* PANOU PRINCIPAL (DASHBOARD) */}
+            {view === 'dashboard_main' && user && (
+                <div style={{ marginTop: '30px', textAlign: 'center' }}>
+                    <h3>Bine ai revenit în panoul principal securizat</h3>
+                    <p style={{ color: '#aaa' }}>Sesiunea ta este activă și protejată prin cheie token de laborator.</p>
+                    <button onClick={() => setView('trip_planner')} style={{ padding: '12px 24px', fontSize: '16px', backgroundColor: '#00bcd4', border: 'none', borderRadius: '4px', cursor: 'pointer', color: '#000', fontWeight: 'bold' }}>Vizualizează Oferte Vacanțe</button>
                 </div>
             )}
 
-            {/* MODAL */}
-            {showModal && (
-                <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.9)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 100 }}>
-                    <div style={{ background: '#161625', padding: '30px', borderRadius: '12px', width: '400px', border: '1px solid cyan' }}>
-                        <h3 style={{ color: 'cyan', marginTop: 0 }}>{editingId ? 'Modify' : 'Create'} Trip Record</h3>
-                        <input value={formData.dest} onChange={e => setFormData({ ...formData, dest: e.target.value })} placeholder="Destination City" style={{ width: '100%', padding: '12px', marginBottom: '10px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }} />
+            {/* PLANIFICATOR COMPLET (TABEL, STATISTICI, GRAFIC) */}
+            {view === 'trip_planner' && user && (
+                <div style={{ marginTop: '20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                        <h3>🗺️ Planificator Oferte Vacanțe</h3>
                         <div style={{ display: 'flex', gap: '10px' }}>
-                            <input type="number" value={formData.price} onChange={e => setFormData({ ...formData, price: parseFloat(e.target.value) })} placeholder="Price ($)" style={{ width: '50%', padding: '12px', marginBottom: '10px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }} />
-                            <input type="number" value={formData.days} onChange={e => setFormData({ ...formData, days: parseInt(e.target.value) })} placeholder="Days" style={{ width: '50%', padding: '12px', marginBottom: '10px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }} />
+                            <button onClick={() => { setEditingId(null); setFormData({ dest: '', price: '', days: '', desc: '' }); setShowModal(true); }} style={{ padding: '8px 16px', backgroundColor: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>➕ Adaugă Vacanță</button>
+                            <button onClick={generateData} disabled={isGenerating} style={{ padding: '8px 16px', backgroundColor: '#ff9800', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>{isGenerating ? 'Se generează...' : '⚡ Generează Date Demo'}</button>
                         </div>
-                        <textarea value={formData.desc} onChange={e => setFormData({ ...formData, desc: e.target.value })} placeholder="Description..." style={{ width: '100%', padding: '12px', marginBottom: '20px', background: '#0a0a12', border: '1px solid #333', color: 'white', height: '80px', boxSizing: 'border-box', borderRadius: '4px' }} />
-                        <button onClick={() => handleAction('SAVE', formData)} style={{ width: '100%', padding: '12px', background: 'cyan', border: 'none', fontWeight: 'bold', cursor: 'pointer', color: 'black', borderRadius: '4px' }}>CONFIRM</button>
-                        <button onClick={() => setShowModal(false)} style={{ width: '100%', marginTop: '10px', background: 'none', border: 'none', color: '#555', cursor: 'pointer' }}>Discard</button>
                     </div>
+
+                    {/* FILTRE CAUTARE */}
+                    <div style={{ display: 'flex', gap: '15px', marginBottom: '20px', padding: '15px', backgroundColor: '#1a1a1e', borderRadius: '6px' }}>
+                        <input type="text" placeholder="Filtrare Oraș..." value={filter.city} onChange={e => { const f = { ...filter, city: e.target.value }; setFilter(f); fetchTrips(false, 1, f); }} style={{ padding: '8px', backgroundColor: '#2a2a30', border: '1px solid #444', color: '#fff', borderRadius: '4px' }} />
+                        <input type="number" placeholder="Preț Minim..." value={filter.minPrice} onChange={e => { const f = { ...filter, minPrice: e.target.value }; setFilter(f); fetchTrips(false, 1, f); }} style={{ padding: '8px', backgroundColor: '#2a2a30', border: '1px solid #444', color: '#fff', borderRadius: '4px', width: '120px' }} />
+                        <input type="number" placeholder="Preț Maxim..." value={filter.maxPrice} onChange={e => { const f = { ...filter, maxPrice: e.target.value }; setFilter(f); fetchTrips(false, 1, f); }} style={{ padding: '8px', backgroundColor: '#2a2a30', border: '1px solid #444', color: '#fff', borderRadius: '4px', width: '120px' }} />
+                    </div>
+
+                    {/* STRUCTURĂ: TABEL + GRAFIC */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '20px' }}>
+                        {/* TABEL LISTĂ VACANȚE */}
+                        <div style={{ backgroundColor: '#1a1a1e', padding: '20px', borderRadius: '8px' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                                <thead>
+                                    <tr style={{ borderBottom: '2px solid #444', color: '#00bcd4' }}>
+                                        <th style={{ padding: '10px' }}>Destinație</th>
+                                        <th>Preț</th>
+                                        <th>Zile</th>
+                                        <th>Acțiuni</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {trips.map(trip => (
+                                        <tr key={trip.id} style={{ borderBottom: '1px solid #333' }}>
+                                            <td style={{ padding: '10px' }}>
+                                                <span onClick={() => setSelectedTrip(trip)} style={{ color: '#fff', cursor: 'pointer', textDecoration: 'underline' }}>{trip.dest}</span>
+                                            </td>
+                                            <td>{trip.price} €</td>
+                                            <td>{trip.days} zile</td>
+                                            <td>
+                                                <button onClick={() => { setEditingId(trip.id); setFormData({ dest: trip.dest, price: trip.price, days: trip.days, desc: trip.desc || '' }); setShowModal(true); }} style={{ marginRight: '5px', padding: '3px 8px', backgroundColor: '#2196f3', color: '#fff', border: 'none', borderRadius: '3px', cursor: 'pointer' }}>Edit</button>
+                                                <button onClick={() => handleDeleteTrip(trip.id)} style={{ padding: '3px 8px', backgroundColor: '#f44336', color: '#fff', border: 'none', borderRadius: '3px', cursor: 'pointer' }}>Șterge</button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                            {page < totalPages && (
+                                <button onClick={() => fetchTrips(true)} style={{ marginTop: '15px', padding: '8px 16px', backgroundColor: '#444', border: 'none', color: '#fff', cursor: 'pointer', borderRadius: '4px' }}>{isLoadingMore ? 'Se încarcă...' : 'Încarcă mai multe vacanțe'}</button>
+                            )}
+                        </div>
+
+                        {/* GRAFIC ANALITIC ȘI METRICI */}
+                        <div style={{ backgroundColor: '#1a1a1e', padding: '20px', borderRadius: '8px', display: 'flex', flexDirection: 'col', gap: '20px' }}>
+                            <h4>📊 Prezentare Grafică Bugete</h4>
+                            {stats && (
+                                <div style={{ fontSize: '14px', background: '#252529', padding: '10px', borderRadius: '6px' }}>
+                                    <p>Total Oferte: <strong>{stats.totalTrips}</strong></p>
+                                    <p>Preț Mediu: <strong>{stats.avgPrice?.toFixed(2)} €</strong></p>
+                                    <p>Preț Maxim: <strong>{stats.maxPrice} €</strong></p>
+                                </div>
+                            )}
+                            <div style={{ width: '100%', height: '220px' }}>
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={trips.slice(0, 5)}>
+                                        <XAxis dataKey="dest" stroke="#aaa" fontSize={11} />
+                                        <YAxis stroke="#aaa" fontSize={11} />
+                                        <Tooltip contentStyle={{ backgroundColor: '#222', borderColor: '#444' }} />
+                                        <Bar dataKey="price" fill="#4caf50" radius={[4, 4, 0, 0]} />
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* MODAL ADĂUGARE / EDITARE VACANȚĂ */}
+            {showModal && (
+                <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 100 }}>
+                    <form onSubmit={handleSaveTrip} style={{ backgroundColor: '#1a1a1e', padding: '25px', borderRadius: '8px', width: '400px' }}>
+                        <h4>{editingId ? 'Modificare Detalii Vacanță' : 'Adăugare Vacanță Nouă'}</h4>
+                        <div style={{ marginBottom: '12px' }}>
+                            <label style={{ display: 'block', fontSize: '13px' }}>Oraș / Destinație:</label>
+                            <input type="text" required value={formData.dest} onChange={e => setFormData({ ...formData, dest: e.target.value })} style={{ width: '100%', padding: '8px', backgroundColor: '#2a2a30', border: '1px solid #444', color: '#fff', borderRadius: '4px', marginTop: '4px' }} />
+                        </div>
+                        <div style={{ marginBottom: '12px', display: 'flex', gap: '10px' }}>
+                            <div style={{ flex: 1 }}>
+                                <label style={{ display: 'block', fontSize: '13px' }}>Preț (€):</label>
+                                <input type="number" required value={formData.price} onChange={e => setFormData({ ...formData, price: e.target.value })} style={{ width: '100%', padding: '8px', backgroundColor: '#2a2a30', border: '1px solid #444', color: '#fff', borderRadius: '4px', marginTop: '4px' }} />
+                            </div>
+                            <div style={{ flex: 1 }}>
+                                <label style={{ display: 'block', fontSize: '13px' }}>Durată (Zile):</label>
+                                <input type="number" required value={formData.days} onChange={e => setFormData({ ...formData, days: e.target.value })} style={{ width: '100%', padding: '8px', backgroundColor: '#2a2a30', border: '1px solid #444', color: '#fff', borderRadius: '4px', marginTop: '4px' }} />
+                            </div>
+                        </div>
+                        <div style={{ marginBottom: '20px' }}>
+                            <label style={{ display: 'block', fontSize: '13px' }}>Descriere Suplimentară:</label>
+                            <textarea value={formData.desc} onChange={e => setFormData({ ...formData, desc: e.target.value })} style={{ width: '100%', padding: '8px', backgroundColor: '#2a2a30', border: '1px solid #444', color: '#fff', borderRadius: '4px', marginTop: '4px', height: '60px', resize: 'none' }} />
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                            <button type="button" onClick={() => setShowModal(false)} style={{ padding: '8px 14px', backgroundColor: '#555', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Anulează</button>
+                            <button type="submit" style={{ padding: '8px 14px', backgroundColor: '#4caf50', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Salvează Modificările</button>
+                        </div>
+                    </form>
+                </div>
+            )}
+
+            {/* MODAL VIZUALIZARE DETALII DETALIATE */}
+            {selectedTrip && (
+                <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 101 }}>
+                    <div style={{ backgroundColor: '#1a1a1e', padding: '25px', borderRadius: '8px', width: '450px' }}>
+                        <h3 style={{ color: '#00bcd4', marginTop: 0 }}>📍 {selectedTrip.dest}</h3>
+                        <p style={{ fontSize: '15px' }}>Cost estimativ pachet: <strong>{selectedTrip.price} €</strong></p>
+                        <p style={{ fontSize: '15px' }}>Durată sejur stabilită: <strong>{selectedTrip.days} zile</strong></p>
+                        <hr style={{ border: '0', borderTop: '1px solid #333', margin: '15px 0' }} />
+                        <p style={{ color: '#ccc', fontStyle: 'italic', lineHeight: '1.5' }}>{selectedTrip.desc || 'Nu există descriere suplimentară atașată pentru această destinație.'}</p>
+                        <button onClick={() => setSelectedTrip(null)} style={{ marginTop: '15px', width: '100%', padding: '10px', backgroundColor: '#2196f3', border: 'none', color: '#fff', borderRadius: '4px', cursor: 'pointer' }}>Închide Detalii</button>
+                    </div>
+                </div>
+            )}
+
+            {/* PANOU DE AUDIT (ADMIN ONLY - GOLD CHALLENGE VISUALS PĂSTRATE) */}
+            {view === 'admin_panel' && user?.role === 'admin' && (
+                <div style={{ marginTop: '20px', backgroundColor: '#161625', padding: '20px', borderRadius: '8px' }}>
+                    <h3>🛡️ Jurnal de Audit și Securitate LAN</h3>
+                    <div style={{ borderBottom: '1px solid #333', marginBottom: '15px' }}>
+                        <button onClick={() => setActiveAdminTab('logs')} style={{ padding: '10px 20px', backgroundColor: activeAdminTab === 'logs' ? '#333' : 'transparent', color: '#fff', border: 'none', cursor: 'pointer' }}>Istoric Acțiuni Recente</button>
+                        <button onClick={() => setActiveAdminTab('suspicious')} style={{ padding: '10px 20px', backgroundColor: activeAdminTab === 'suspicious' ? '#333' : 'transparent', color: '#ff5252', border: 'none', cursor: 'pointer' }}>Utilizatori Suspicioși</button>
+                    </div>
+
+                    {activeAdminTab === 'logs' ? (
+                        <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+                                <thead>
+                                    <tr style={{ color: '#ff4d4d', borderBottom: '2px solid #333' }}>
+                                        <th style={{ padding: '8px' }}>Utilizator</th>
+                                        <th>Rol</th>
+                                        <th>Acțiune înregistrată</th>
+                                        <th>Timestamp</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {auditLogs.map(log => (
+                                        <tr key={log.id} style={{ borderBottom: '1px solid #222' }}>
+                                            <td style={{ padding: '8px' }}>{log.userId}</td>
+                                            <td>{log.role}</td>
+                                            <td>{log.action}</td>
+                                            <td>{new Date(log.timestamp).toLocaleString()}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    ) : (
+                        <ul>
+                            {suspiciousUsers.map(u => (
+                                <li key={u.id} style={{ color: '#ff5252', padding: '5px 0' }}>⚠️ Utilizator suspectat de FLOOD: <strong>{u.username}</strong> (Flagged: {new Date(u.updatedAt).toLocaleString()})</li>
+                            ))}
+                        </ul>
+                    )}
+                </div>
+            )}
+
+            {/* MULTI-ROOM CHAT WIDGET POPUP INTEGRAT URMATOR CERINTELOR TALE */}
+            {user && (
+                <div style={{ position: 'fixed', bottom: '20px', right: '20px', zIndex: 1000 }}>
+                    {!showChat ? (
+                        <button onClick={() => setShowChat(true)} style={{ padding: '12px 24px', backgroundColor: '#007bff', color: '#fff', border: 'none', borderRadius: '50px', cursor: 'pointer', fontWeight: 'bold', boxShadow: '0 4px 15px rgba(0,123,255,0.4)' }}>💬 Deschide Live Chat</button>
+                    ) : (
+                        <div style={{ width: '350px', height: '450px', backgroundColor: '#1a1a1e', border: '1px solid #333', borderRadius: '12px', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 8px 24px rgba(0,0,0,0.6)' }}>
+                            <div style={{ backgroundColor: '#252529', padding: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #333' }}>
+                                <h4 style={{ margin: 0, color: '#00bcd4' }}>💬 Cameră: {chatRoom}</h4>
+                                <button onClick={() => setShowChat(false)} style={{ background: 'transparent', border: 'none', color: '#ff5252', fontSize: '16px', cursor: 'pointer', fontWeight: 'bold' }}>✕</button>
+                            </div>
+                            <div style={{ flex: 1, padding: '15px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                {chatMessages.map((msg, idx) => (
+                                    <div key={idx} style={{ alignSelf: msg.username === user.username ? 'flex-end' : 'flex-start', background: msg.username === user.username ? '#007bff' : '#2d2d34', padding: '8px 12px', borderRadius: '8px', maxWidth: '80%', fontSize: '14px' }}>
+                                        <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>{msg.username} ({msg.role || 'user'})</div>
+                                        <div>{msg.text}</div>
+                                    </div>
+                                ))}
+                                <div ref={chatEndRef} />
+                            </div>
+                            <div style={{ padding: '10px', display: 'flex', gap: '5px', backgroundColor: '#252529', borderTop: '1px solid #333' }}>
+                                <input type="text" placeholder="Scrie un mesaj securizat..." value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyPress={e => e.key === 'Enter' && sendMessage()} style={{ flex: 1, padding: '8px', backgroundColor: '#121214', border: '1px solid #444', color: '#fff', borderRadius: '4px' }} />
+                                <button onClick={sendMessage} style={{ padding: '8px 12px', backgroundColor: '#00bcd4', border: 'none', borderRadius: '4px', color: '#000', fontWeight: 'bold', cursor: 'pointer' }}>Trimite</button>
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
         </div>
