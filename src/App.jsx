@@ -5,7 +5,7 @@ import { io } from 'socket.io-client';
 const SERVER = import.meta.env.VITE_SERVER_URL || 'https://tripmap1.onrender.com';
 const socket = io(SERVER, { transports: ['websocket'] });
 
-// BRONZE A4: Token stocat in memorie (nu localStorage) - mai sigur
+// BRONZE A4: Token stocat in memorie (nu localStorage) - mai sigur fata de XSS
 let authToken = null;
 
 const App = () => {
@@ -69,14 +69,14 @@ const App = () => {
         return user?.permissions?.includes(perm);
     };
 
-    // BRONZE A4: Toate requesturile trimit JWT token
-    const gqlFetch = useCallback(async (query) => {
+    // BRONZE A4: Helper pentru request-uri GraphQL cu variabile (previne injection)
+    const gqlFetch = useCallback(async (query, variables = {}) => {
         const headers = { 'Content-Type': 'application/json' };
         if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
         const res = await fetch(`${SERVER}/graphql`, {
             method: 'POST',
             headers,
-            body: JSON.stringify({ query }),
+            body: JSON.stringify({ query, variables }),
         });
         const data = await res.json();
         // Daca token-ul a expirat, logout automat
@@ -86,7 +86,7 @@ const App = () => {
         return data;
     }, [handleLogout]);
 
-    // BRONZE A4: Login cu JWT
+    // BRONZE A4: Login cu JWT — foloseste variabile GraphQL (nu string interpolation)
     const handleLogin = async () => {
         setLoginError('');
         setSuccessMessage('');
@@ -95,15 +95,25 @@ const App = () => {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    query: `mutation { login(username: "${loginForm.username}", password: "${loginForm.password}") { id username role permissions token isSuspicious } }`
-                })
+                    query: `
+                        mutation Login($username: String!, $password: String!) {
+                            login(username: $username, password: $password) {
+                                id username role permissions token isSuspicious
+                            }
+                        }
+                    `,
+                    variables: {
+                        username: loginForm.username,
+                        password: loginForm.password,
+                    },
+                }),
             });
             const data = await result.json();
             if (data.errors) { setLoginError('Invalid username or password'); return; }
 
             const loggedUser = data.data.login;
 
-            // BRONZE A4: Salveaza token in memorie
+            // BRONZE A4: Salveaza token in memorie (nu localStorage)
             authToken = loggedUser.token;
 
             setUser(loggedUser);
@@ -186,7 +196,8 @@ const App = () => {
     const fetchGoldAdminData = useCallback(async () => {
         if (user?.role !== 'admin') return;
         try {
-            const headers = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+            const headers = { 'Content-Type': 'application/json' };
+            if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
             const [suspRes, logsRes] = await Promise.all([
                 fetch(`${SERVER}/api/admin/suspicious`, { headers }),
                 fetch(`${SERVER}/api/admin/audit-logs`, { headers })
@@ -197,21 +208,35 @@ const App = () => {
     }, [user]);
 
     const clearSuspicious = async (userId) => {
-        const headers = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+        const headers = { 'Content-Type': 'application/json' };
+        if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
         await fetch(`${SERVER}/api/admin/suspicious/${userId}`, { method: 'DELETE', headers });
         setSuspiciousUsers(prev => prev.filter(u => u.id !== userId));
     };
 
-    // Trips
+    // Trips — foloseste variabile GraphQL pentru filtre
     const fetchTrips = useCallback(async (isNextPage = false, targetPageManual = null, filterOverride = null) => {
         const targetPage = targetPageManual || (isNextPage ? page + 1 : page);
         const activeFilter = filterOverride !== null ? filterOverride : filter;
-        const cityArg = activeFilter.city ? `, city: "${activeFilter.city}"` : '';
-        const minArg = activeFilter.minPrice !== '' ? `, minPrice: ${Number(activeFilter.minPrice)}` : '';
-        const maxArg = activeFilter.maxPrice !== '' ? `, maxPrice: ${Number(activeFilter.maxPrice)}` : '';
+
+        const query = `
+            query GetTrips($page: Int, $city: String, $minPrice: Float, $maxPrice: Float) {
+                getTrips(page: $page, city: $city, minPrice: $minPrice, maxPrice: $maxPrice) {
+                    total totalPages
+                    data { id dest price days desc }
+                }
+            }
+        `;
+        const variables = {
+            page: targetPage,
+            city: activeFilter.city || null,
+            minPrice: activeFilter.minPrice !== '' ? Number(activeFilter.minPrice) : null,
+            maxPrice: activeFilter.maxPrice !== '' ? Number(activeFilter.maxPrice) : null,
+        };
+
         try {
             if (isNextPage) setIsLoadingMore(true);
-            const result = await gqlFetch(`query { getTrips(page: ${targetPage}${cityArg}${minArg}${maxArg}) { total totalPages data { id dest price days desc } } }`);
+            const result = await gqlFetch(query, variables);
             if (result.data) {
                 const newData = result.data.getTrips.data;
                 setTrips(prev => isNextPage ? [...prev, ...newData] : newData);
@@ -252,21 +277,44 @@ const App = () => {
         return () => observer.disconnect();
     }, [isLoadingMore, page, totalPages, isOnline, view, fetchTrips]);
 
+    // BRONZE A4: handleAction foloseste variabile GraphQL (nu string interpolation)
     const handleAction = async (method, data) => {
-        let gqlMutation = '';
         if (method === 'DELETE') {
             if (!hasPermission('delete_trip')) return alert('No permission!');
-            gqlMutation = `mutation { deleteTrip(id: "${data.id}") }`;
-        } else {
-            if (editingId && !hasPermission('edit_trip')) return alert('No permission!');
-            if (!editingId && !hasPermission('create_trip')) return alert('No permission!');
-            if (!data.dest || data.price <= 0) return alert('Invalid data!');
-            gqlMutation = editingId
-                ? `mutation { updateTrip(id: "${editingId}", dest: "${data.dest}", price: ${data.price}, days: ${data.days}, desc: "${data.desc}") { id } }`
-                : `mutation { addTrip(dest: "${data.dest}", price: ${data.price}, days: ${data.days}, desc: "${data.desc}") { id } }`;
+            try {
+                const result = await gqlFetch(
+                    `mutation DeleteTrip($id: ID!) { deleteTrip(id: $id) }`,
+                    { id: data.id }
+                );
+                if (result.errors) return alert(result.errors[0].message);
+                setShowModal(false);
+                fetchTrips(false, 1);
+                fetchStats();
+            } catch { setIsOnline(false); }
+            return;
         }
+
+        if (editingId && !hasPermission('edit_trip')) return alert('No permission!');
+        if (!editingId && !hasPermission('create_trip')) return alert('No permission!');
+        if (!data.dest || data.price <= 0) return alert('Invalid data!');
+
         try {
-            const result = await gqlFetch(gqlMutation);
+            let result;
+            if (editingId) {
+                result = await gqlFetch(
+                    `mutation UpdateTrip($id: ID!, $dest: String!, $price: Float!, $days: Int!, $desc: String) {
+                        updateTrip(id: $id, dest: $dest, price: $price, days: $days, desc: $desc) { id }
+                    }`,
+                    { id: editingId, dest: data.dest, price: Number(data.price), days: Number(data.days), desc: data.desc || '' }
+                );
+            } else {
+                result = await gqlFetch(
+                    `mutation AddTrip($dest: String!, $price: Float!, $days: Int!, $desc: String) {
+                        addTrip(dest: $dest, price: $price, days: $days, desc: $desc) { id }
+                    }`,
+                    { dest: data.dest, price: Number(data.price), days: Number(data.days), desc: data.desc || '' }
+                );
+            }
             if (result.errors) return alert(result.errors[0].message);
             setShowModal(false);
             fetchTrips(false, 1);
@@ -486,7 +534,10 @@ const App = () => {
                 <div style={{ textAlign: 'center', marginBottom: '20px' }}>
                     <button onClick={async () => {
                         const action = isGenerating ? 'stop' : 'start';
-                        await gqlFetch(`mutation { toggleGenerator(action: "${action}") }`);
+                        await gqlFetch(
+                            `mutation ToggleGen($action: String!) { toggleGenerator(action: $action) }`,
+                            { action }
+                        );
                         setIsGenerating(!isGenerating);
                     }} style={{ background: isGenerating ? '#ff4d4d' : '#00ff88', border: 'none', padding: '10px 25px', borderRadius: '20px', fontWeight: 'bold', cursor: 'pointer' }}>
                         {isGenerating ? 'STOP GENERATOR' : 'START LIVE DATA GENERATOR'}

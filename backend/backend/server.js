@@ -133,6 +133,24 @@ function verifyToken(authHeader) {
 }
 
 // ─────────────────────────────────────────────
+// BRONZE A4: MIDDLEWARE — verifica token admin
+// ─────────────────────────────────────────────
+function requireAdmin(req, res, next) {
+    const user = verifyToken(req.headers.authorization || '');
+    if (!user) return res.status(401).json({ error: 'Unauthorized: no valid token' });
+    if (user.role !== 'admin') return res.status(403).json({ error: 'Forbidden: admin only' });
+    req.authUser = user;
+    next();
+}
+
+function requireAuth(req, res, next) {
+    const user = verifyToken(req.headers.authorization || '');
+    if (!user) return res.status(401).json({ error: 'Unauthorized: no valid token' });
+    req.authUser = user;
+    next();
+}
+
+// ─────────────────────────────────────────────
 // GOLD: STEALTH INTRUSION DETECTOR
 // ─────────────────────────────────────────────
 async function logAction(userIdentifier, role, actionDescription) {
@@ -190,7 +208,6 @@ async function migrate() {
     await adminRole.setPermissions(Object.values(perms));
     await userRole.setPermissions([perms['view_trips']]);
 
-    // BRONZE A4: Parole stocate hashuit cu bcrypt
     const adminHash = await bcrypt.hash('admin123', 10);
     const userHash = await bcrypt.hash('user123', 10);
 
@@ -292,21 +309,22 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-app.get('/api/admin/suspicious', async (req, res) => {
+// BRONZE A4: Admin endpoints protejate cu requireAdmin middleware
+app.get('/api/admin/suspicious', requireAdmin, async (req, res) => {
     try {
         const users = await User.findAll({ where: { isSuspicious: true }, attributes: ['id', 'username', 'updatedAt'] });
         res.json(users);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete('/api/admin/suspicious/:id', async (req, res) => {
+app.delete('/api/admin/suspicious/:id', requireAdmin, async (req, res) => {
     try {
         await User.update({ isSuspicious: false }, { where: { id: req.params.id } });
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/admin/audit-logs', async (req, res) => {
+app.get('/api/admin/audit-logs', requireAdmin, async (req, res) => {
     try {
         const logs = await AuditLog.findAll({ order: [['timestamp', 'DESC']], limit: 100 });
         res.json(logs);
