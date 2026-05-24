@@ -10,9 +10,15 @@ const { ApolloServer, gql } = require('apollo-server-express');
 const { Sequelize, DataTypes, Op } = require('sequelize');
 const mongoose = require('mongoose');
 const path = require('path');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+
+// BRONZE A4: JWT secret + sesiune 2 ore
+const JWT_SECRET = process.env.JWT_SECRET || 'tripmap_bronze_secret_2026';
+const JWT_EXPIRES = '2h';
 
 // ─────────────────────────────────────────────
-// 1.  POSTGRESQL SETUP (Sequelize ORM)
+// 1. POSTGRESQL SETUP
 // ─────────────────────────────────────────────
 const sequelize = process.env.NODE_ENV === 'production'
     ? new Sequelize(
@@ -34,13 +40,13 @@ const sequelize = process.env.NODE_ENV === 'production'
     });
 
 // ─────────────────────────────────────────────
-// 2.  MONGODB SETUP (Mongoose - NoSQL for Chat)
+// 2. MONGODB SETUP
 // ─────────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://dariaabrudan1_db_user:NUkRsTK43VD8dNZi@cluster0.emvcr7r.mongodb.net/tripmap_chat?appName=Cluster0';
 
 mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ MongoDB connected (Chat)'))
-    .catch(err => console.error('❌ MongoDB error:', err));
+    .then(() => console.log('MongoDB connected'))
+    .catch(err => console.error('MongoDB error:', err));
 
 const MessageSchema = new mongoose.Schema({
     username: { type: String, required: true },
@@ -49,11 +55,10 @@ const MessageSchema = new mongoose.Schema({
     room: { type: String, default: 'general' },
     createdAt: { type: Date, default: Date.now },
 });
-
 const Message = mongoose.model('Message', MessageSchema);
 
 // ─────────────────────────────────────────────
-// 3.  POSTGRESQL MODELS (GOLD ENHANCED)
+// 3. POSTGRESQL MODELS
 // ─────────────────────────────────────────────
 const Role = sequelize.define('Role', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
@@ -75,7 +80,7 @@ const User = sequelize.define('User', {
     username: { type: DataTypes.STRING(100), allowNull: false, unique: true, validate: { len: [3, 100] } },
     password: { type: DataTypes.STRING(255), allowNull: false },
     roleId: { type: DataTypes.INTEGER, allowNull: false, references: { model: 'roles', key: 'id' } },
-    isSuspicious: { type: DataTypes.BOOLEAN, defaultValue: false }, // GOLD List
+    isSuspicious: { type: DataTypes.BOOLEAN, defaultValue: false },
 }, { tableName: 'users', timestamps: true });
 
 const Destination = sequelize.define('Destination', {
@@ -92,7 +97,6 @@ const Trip = sequelize.define('Trip', {
     destinationId: { type: DataTypes.INTEGER, allowNull: false, references: { model: 'destinations', key: 'id' } },
 }, { tableName: 'trips', timestamps: true });
 
-// ── GOLD AUDIT LOG MODEL ──
 const AuditLog = sequelize.define('AuditLog', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     userId: { type: DataTypes.STRING, allowNull: false },
@@ -101,7 +105,6 @@ const AuditLog = sequelize.define('AuditLog', {
     timestamp: { type: DataTypes.DATE, defaultValue: DataTypes.NOW }
 }, { tableName: 'audit_logs', timestamps: false });
 
-// Associations
 Role.belongsToMany(Permission, { through: RolePermission, foreignKey: 'roleId', as: 'permissions' });
 Permission.belongsToMany(Role, { through: RolePermission, foreignKey: 'permissionId', as: 'roles' });
 User.belongsTo(Role, { foreignKey: 'roleId', as: 'role' });
@@ -109,7 +112,29 @@ Role.hasMany(User, { foreignKey: 'roleId', as: 'users' });
 Destination.hasMany(Trip, { foreignKey: 'destinationId', as: 'trips' });
 Trip.belongsTo(Destination, { foreignKey: 'destinationId', as: 'destination' });
 
-// ── GOLD LOGIC ENGINE: SYSTEM INTRUSION DETECTOR ──
+// ─────────────────────────────────────────────
+// BRONZE A4: JWT HELPERS
+// ─────────────────────────────────────────────
+function generateToken(user) {
+    return jwt.sign(
+        { id: user.id, username: user.username, role: user.role.name },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES }
+    );
+}
+
+function verifyToken(authHeader) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+    try {
+        return jwt.verify(authHeader.replace('Bearer ', ''), JWT_SECRET);
+    } catch (e) {
+        return null;
+    }
+}
+
+// ─────────────────────────────────────────────
+// GOLD: STEALTH INTRUSION DETECTOR
+// ─────────────────────────────────────────────
 async function logAction(userIdentifier, role, actionDescription) {
     try {
         await AuditLog.create({
@@ -118,7 +143,6 @@ async function logAction(userIdentifier, role, actionDescription) {
             action: actionDescription
         });
 
-        // Verificăm atacuri de tip Flood sau comportament malițios (mai mult de 3 acțiuni în ultimele 10 secunde)
         const tenSecondsAgo = new Date(Date.now() - 10000);
         const recentActionsCount = await AuditLog.count({
             where: {
@@ -128,7 +152,6 @@ async function logAction(userIdentifier, role, actionDescription) {
         });
 
         if (recentActionsCount > 3) {
-            // Prindem utilizatorul indiferent dacă logarea s-a făcut după Username sau după ID numeric
             await User.update(
                 { isSuspicious: true },
                 {
@@ -140,7 +163,7 @@ async function logAction(userIdentifier, role, actionDescription) {
                     }
                 }
             );
-            console.log(`⚠️ STEALTH DETECTOR: User '${userIdentifier}' flagged as SUSPICIOUS (Flood detected)`);
+            console.log(`STEALTH: User '${userIdentifier}' flagged SUSPICIOUS`);
         }
     } catch (err) {
         console.error('Audit log error:', err);
@@ -148,11 +171,10 @@ async function logAction(userIdentifier, role, actionDescription) {
 }
 
 // ─────────────────────────────────────────────
-// 4.  DATABASE MIGRATION + SEED
+// 4. DATABASE MIGRATION + SEED
 // ─────────────────────────────────────────────
 async function migrate() {
     await sequelize.authenticate();
-    // Păstrăm force: true DOAR o tură ca să re-creăm tabela audit_logs pe curat.
     await sequelize.sync({ force: true });
 
     const [adminRole] = await Role.findOrCreate({ where: { name: 'admin' } });
@@ -168,25 +190,23 @@ async function migrate() {
     await adminRole.setPermissions(Object.values(perms));
     await userRole.setPermissions([perms['view_trips']]);
 
-    const adminCount = await User.count({ where: { roleId: adminRole.id } });
-    if (adminCount === 0) {
-        await User.create({ username: 'admin', password: 'admin123', roleId: adminRole.id });
-        await User.create({ username: 'user1', password: 'user123', roleId: userRole.id });
-    }
+    // BRONZE A4: Parole stocate hashuit cu bcrypt
+    const adminHash = await bcrypt.hash('admin123', 10);
+    const userHash = await bcrypt.hash('user123', 10);
 
-    const tripCount = await Trip.count();
-    if (tripCount === 0) {
-        const paris = await Destination.create({ city: 'Paris', country: 'France' });
-        const tokyo = await Destination.create({ city: 'Tokyo', country: 'Japan' });
-        await Trip.create({ price: 2500, days: 5, description: 'Orașul Luminilor.', destinationId: paris.id });
-        await Trip.create({ price: 3800, days: 10, description: 'Tradiție și tehnologie.', destinationId: tokyo.id });
-    }
+    await User.create({ username: 'admin', password: adminHash, roleId: adminRole.id });
+    await User.create({ username: 'user1', password: userHash, roleId: userRole.id });
 
-    console.log('✅ Database migrated, seeded and Gold Audit active.');
+    const paris = await Destination.create({ city: 'Paris', country: 'France' });
+    const tokyo = await Destination.create({ city: 'Tokyo', country: 'Japan' });
+    await Trip.create({ price: 2500, days: 5, description: 'Orasul Luminilor.', destinationId: paris.id });
+    await Trip.create({ price: 3800, days: 10, description: 'Traditie si tehnologie.', destinationId: tokyo.id });
+
+    console.log('DB ready: bcrypt + JWT active.');
 }
 
 // ─────────────────────────────────────────────
-// 5.  HELPER
+// 5. HELPER
 // ─────────────────────────────────────────────
 const toGql = (trip) => ({
     id: String(trip.id),
@@ -195,11 +215,10 @@ const toGql = (trip) => ({
     days: trip.days,
     desc: trip.description || '',
 });
-
 const include = [{ model: Destination, as: 'destination' }];
 
 // ─────────────────────────────────────────────
-// 6.  EXPRESS + SOCKET.IO + REST ENDPOINTS
+// 6. EXPRESS + SOCKET.IO
 // ─────────────────────────────────────────────
 const app = express();
 const server = http.createServer(app);
@@ -208,82 +227,94 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(cors());
 app.use(express.json());
 
-// REST - Login
+// BRONZE A4: Login cu bcrypt + JWT
 app.post('/api/login', async (req, res) => {
-    const { username, password } = req.body;
-    const user = await User.findOne({
-        where: { username, password },
-        include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
-    });
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
-    // GOLD Log
-    await logAction(user.username, user.role.name, `User logged into the platform via REST`);
+        const user = await User.findOne({
+            where: { username: username.trim() },
+            include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
+        });
 
-    res.json({
-        id: user.id,
-        username: user.username,
-        role: user.role.name,
-        permissions: user.role.permissions.map(p => p.name),
-    });
+        if (!user) {
+            await logAction(username, 'anonymous', 'Failed login attempt');
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) {
+            await logAction(username, 'anonymous', 'Failed login attempt (wrong password)');
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        const token = generateToken(user);
+        await logAction(user.username, user.role.name, 'User logged in via REST');
+
+        res.json({
+            token,
+            id: user.id,
+            username: user.username,
+            role: user.role.name,
+            permissions: user.role.permissions.map(p => p.name),
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// REST - Register
+// BRONZE A4: Register cu bcrypt
 app.post('/api/register', async (req, res) => {
-    const { username, password } = req.body;
-    if (!username || username.length < 3) return res.status(400).json({ error: 'Username too short (min 3 chars)' });
-    if (!password || password.length < 4) return res.status(400).json({ error: 'Password too short (min 4 chars)' });
+    try {
+        const { username, password } = req.body;
+        if (!username || username.trim().length < 3) return res.status(400).json({ error: 'Username too short (min 3 chars)' });
+        if (!password || password.length < 4) return res.status(400).json({ error: 'Password too short (min 4 chars)' });
 
-    const existing = await User.findOne({ where: { username } });
-    if (existing) return res.status(400).json({ error: 'Username already taken' });
+        const existing = await User.findOne({ where: { username: username.trim() } });
+        if (existing) return res.status(400).json({ error: 'Username already taken' });
 
-    const userRole = await Role.findOne({ where: { name: 'user' } });
-    const newUser = await User.create({ username, password, roleId: userRole.id });
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const userRole = await Role.findOne({ where: { name: 'user' } });
+        const newUser = await User.create({ username: username.trim(), password: hashedPassword, roleId: userRole.id });
 
-    // GOLD Log
-    await logAction(newUser.username, 'user', `Account successfully registered`);
+        await logAction(newUser.username, 'user', 'Account registered');
 
-    res.json({ id: newUser.id, username: newUser.username, role: 'user' });
+        const token = jwt.sign(
+            { id: newUser.id, username: newUser.username, role: 'user' },
+            JWT_SECRET,
+            { expiresIn: JWT_EXPIRES }
+        );
+
+        res.json({ token, id: newUser.id, username: newUser.username, role: 'user', permissions: ['view_trips'] });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// REST - GOLD STEALTH OBSERVATION LIST FOR ADMIN
 app.get('/api/admin/suspicious', async (req, res) => {
     try {
-        const suspiciousUsers = await User.findAll({
-            where: { isSuspicious: true },
-            attributes: ['id', 'username', 'updatedAt']
-        });
-        res.json(suspiciousUsers);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const users = await User.findAll({ where: { isSuspicious: true }, attributes: ['id', 'username', 'updatedAt'] });
+        res.json(users);
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// REST - NEW ROUTE FOR FRONTEND VISUAL AUDIT TRAILS PANEL
+app.delete('/api/admin/suspicious/:id', async (req, res) => {
+    try {
+        await User.update({ isSuspicious: false }, { where: { id: req.params.id } });
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/admin/audit-logs', async (req, res) => {
     try {
-        const logs = await AuditLog.findAll({
-            order: [['timestamp', 'DESC']],
-            limit: 100
-        });
+        const logs = await AuditLog.findAll({ order: [['timestamp', 'DESC']], limit: 100 });
         res.json(logs);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/api/users', async (req, res) => {
-    const users = await User.findAll({
-        include: [{ model: Role, as: 'role' }],
-        attributes: ['id', 'username', 'createdAt'],
-    });
-    res.json(users.map(u => ({ id: u.id, username: u.username, role: u.role.name })));
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/chat/:room', async (req, res) => {
-    const messages = await Message.find({ room: req.params.room })
-        .sort({ createdAt: -1 })
-        .limit(50);
+    const messages = await Message.find({ room: req.params.room }).sort({ createdAt: -1 }).limit(50);
     res.json(messages.reverse());
 });
 
@@ -298,38 +329,20 @@ app.get('/api/stats', async (req, res) => {
         attributes: [
             [sequelize.fn('AVG', sequelize.col('price')), 'avgPrice'],
             [sequelize.fn('MAX', sequelize.col('price')), 'maxPrice'],
-        ],
-        raw: true,
+        ], raw: true,
     });
     res.json({ totalTrips: total, avgPrice: result.avgPrice || 0, maxPrice: result.maxPrice || 0 });
 });
 
-app.get('/api/trips/filter', async (req, res) => {
-    const { city, minPrice, maxPrice, minDays, maxDays } = req.query;
-    const where = {};
-    if (minPrice) where.price = { ...where.price, [Op.gte]: Number(minPrice) };
-    if (maxPrice) where.price = { ...where.price, [Op.lte]: Number(maxPrice) };
-    if (minDays) where.days = { ...where.days, [Op.gte]: Number(minDays) };
-    if (maxDays) where.days = { ...where.days, [Op.lte]: Number(maxDays) };
-    const destWhere = city ? { city: { [Op.like]: `%${city}%` } } : {};
-    const trips = await Trip.findAll({
-        where,
-        include: [{ model: Destination, as: 'destination', where: destWhere }],
-    });
-    res.json(trips.map(toGql));
-});
-
 // ─────────────────────────────────────────────
-// 7.  SOCKET.IO - Real-Time Chat + GOLD Logging
+// 7. SOCKET.IO
 // ─────────────────────────────────────────────
 io.on('connection', (socket) => {
     socket.on('joinRoom', ({ username, room }) => {
         socket.join(room);
         socket.to(room).emit('chatMessage', {
-            username: 'System',
-            text: `${username} joined the room`,
-            role: 'system',
-            createdAt: new Date(),
+            username: 'System', text: `${username} joined the room`,
+            role: 'system', createdAt: new Date(),
         });
     });
 
@@ -337,46 +350,20 @@ io.on('connection', (socket) => {
         const msg = new Message({ username, role, text, room });
         await msg.save();
         io.to(room).emit('chatMessage', { username, role, text, createdAt: msg.createdAt });
-
-        // Căutăm utilizatorul hibrid: după numele de utilizator (trimis de websocket)
-        const userIdentifier = username || userId || 'unknown';
-        await logAction(userIdentifier, role || 'user', `Sent live chat message: "${text.substring(0, 30)}..."`);
+        await logAction(username || userId || 'unknown', role || 'user', `Chat: "${text.substring(0, 30)}"`);
     });
 
     socket.on('tripsUpdated', () => io.emit('tripsUpdated'));
 });
 
 // ─────────────────────────────────────────────
-// 8.  GRAPHQL SCHEMA
+// 8. GRAPHQL SCHEMA
 // ─────────────────────────────────────────────
 const typeDefs = gql`
-  type Trip {
-    id: ID!
-    dest: String!
-    price: Float!
-    days: Int!
-    desc: String
-  }
-
-  type Stats {
-    avgPrice: Float!
-    totalTrips: Int!
-    maxPrice: Float!
-  }
-
-  type PaginatedTrips {
-    total: Int!
-    data: [Trip]!
-    totalPages: Int!
-  }
-
-  type UserInfo {
-    id: ID!
-    username: String!
-    role: String!
-    permissions: [String]!
-    isSuspicious: Boolean
-  }
+  type Trip { id: ID! dest: String! price: Float! days: Int! desc: String }
+  type Stats { avgPrice: Float! totalTrips: Int! maxPrice: Float! }
+  type PaginatedTrips { total: Int! data: [Trip]! totalPages: Int! }
+  type UserInfo { id: ID! username: String! role: String! permissions: [String]! isSuspicious: Boolean token: String }
 
   type Query {
     getTrips(page: Int, city: String, minPrice: Float, maxPrice: Float): PaginatedTrips
@@ -395,7 +382,7 @@ const typeDefs = gql`
 `;
 
 // ─────────────────────────────────────────────
-// 9.  GRAPHQL RESOLVERS
+// 9. GRAPHQL RESOLVERS
 // ─────────────────────────────────────────────
 let generatorInterval = null;
 
@@ -408,67 +395,61 @@ const resolvers = {
             if (minPrice != null && minPrice !== '') tripWhere.price = { ...tripWhere.price, [Op.gte]: Number(minPrice) };
             if (maxPrice != null && maxPrice !== '') tripWhere.price = { ...tripWhere.price, [Op.lte]: Number(maxPrice) };
             const destInclude = {
-                model: Destination,
-                as: 'destination',
-                required: city ? true : false,
+                model: Destination, as: 'destination', required: !!city,
                 ...(city ? { where: { city: { [Op.like]: `%${city}%` } } } : {}),
             };
             const { count, rows } = await Trip.findAndCountAll({
-                where: tripWhere,
-                include: [destInclude],
-                limit: LIMIT,
-                offset,
-                order: [['createdAt', 'DESC']],
-                distinct: true,
+                where: tripWhere, include: [destInclude],
+                limit: LIMIT, offset, order: [['createdAt', 'DESC']], distinct: true,
             });
             return { total: count, totalPages: Math.ceil(count / LIMIT) || 1, data: rows.map(toGql) };
         },
-
         getStats: async () => {
             const total = await Trip.count();
             const result = await Trip.findOne({
-                attributes: [
-                    [sequelize.fn('AVG', sequelize.col('price')), 'avgPrice'],
-                    [sequelize.fn('MAX', sequelize.col('price')), 'maxPrice'],
-                ],
+                attributes: [[sequelize.fn('AVG', sequelize.col('price')), 'avgPrice'], [sequelize.fn('MAX', sequelize.col('price')), 'maxPrice']],
                 raw: true,
             });
             return { avgPrice: parseFloat(result?.avgPrice) || 0, maxPrice: parseFloat(result?.maxPrice) || 0, totalTrips: total };
         },
-
         ping: () => 'pong',
-
         getUsers: async () => {
             const users = await User.findAll({
                 include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
             });
             return users.map(u => ({
-                id: String(u.id),
-                username: u.username,
-                role: u.role.name,
-                permissions: u.role.permissions.map(p => p.name),
-                isSuspicious: u.isSuspicious
+                id: String(u.id), username: u.username, role: u.role.name,
+                permissions: u.role.permissions.map(p => p.name), isSuspicious: u.isSuspicious
             }));
         },
     },
 
     Mutation: {
+        // BRONZE A4: login cu bcrypt + JWT in GraphQL
         login: async (_, { username, password }) => {
             const user = await User.findOne({
-                where: { username, password },
+                where: { username: username.trim() },
                 include: [{ model: Role, as: 'role', include: [{ model: Permission, as: 'permissions' }] }],
             });
-            if (!user) throw new Error('Invalid credentials');
 
-            // GOLD Log via GraphQL
-            await logAction(user.username, user.role.name, `User logged in via GraphQL`);
+            if (!user) {
+                await logAction(username, 'anonymous', 'Failed GraphQL login');
+                throw new Error('Invalid credentials');
+            }
+
+            const isMatch = await bcrypt.compare(password, user.password);
+            if (!isMatch) {
+                await logAction(username, 'anonymous', 'Failed GraphQL login (wrong password)');
+                throw new Error('Invalid credentials');
+            }
+
+            const token = generateToken(user);
+            await logAction(user.username, user.role.name, 'User logged in via GraphQL');
 
             return {
-                id: String(user.id),
-                username: user.username,
-                role: user.role.name,
+                id: String(user.id), username: user.username, role: user.role.name,
                 permissions: user.role.permissions.map(p => p.name),
-                isSuspicious: user.isSuspicious
+                isSuspicious: user.isSuspicious, token
             };
         },
 
@@ -485,7 +466,6 @@ const resolvers = {
         updateTrip: async (_, { id, dest, price, days, desc }) => {
             const trip = await Trip.findByPk(id, { include });
             if (!trip) throw new Error('Trip not found');
-            if (price < 0) throw new Error('Price cannot be negative.');
             const [destination] = await Destination.findOrCreate({ where: { city: dest.trim() }, defaults: { city: dest.trim() } });
             await trip.update({ price: Number(price), days: Number(days), description: desc || '', destinationId: destination.id });
             await trip.reload({ include });
@@ -506,12 +486,7 @@ const resolvers = {
                     const cities = ['Berlin', 'Rome', 'Barcelona', 'Amsterdam', 'Vienna', 'Prague', 'Lisbon', 'Athens'];
                     const city = cities[Math.floor(Math.random() * cities.length)] + ' ' + Date.now();
                     const [dest] = await Destination.findOrCreate({ where: { city }, defaults: { city } });
-                    await Trip.create({
-                        price: Math.floor(Math.random() * 5000),
-                        days: Math.floor(Math.random() * 14) + 1,
-                        description: 'Generated by Gold Engine.',
-                        destinationId: dest.id,
-                    });
+                    await Trip.create({ price: Math.floor(Math.random() * 5000), days: Math.floor(Math.random() * 14) + 1, description: 'Generated.', destinationId: dest.id });
                     io.emit('tripsUpdated');
                 }, 3000);
                 return 'Started';
@@ -528,11 +503,23 @@ const resolvers = {
 // ─────────────────────────────────────────────
 async function start() {
     await migrate();
-    const apollo = new ApolloServer({ typeDefs, resolvers });
+    const apollo = new ApolloServer({
+        typeDefs,
+        resolvers,
+        // BRONZE A4: verifica JWT la fiecare request GraphQL
+        context: ({ req }) => {
+            const user = verifyToken(req.headers.authorization || '');
+            return { user };
+        }
+    });
     await apollo.start();
     apollo.applyMiddleware({ app, path: '/graphql' });
     const PORT = process.env.PORT || 5000;
-    server.listen(PORT, () => console.log(`🚀 Gold Server ready on port ${PORT}`));
+    // 0.0.0.0 = accesibil din LAN (iPhone, alte dispozitive)
+    server.listen(PORT, '0.0.0.0', () => {
+        console.log(`Server ready on port ${PORT}`);
+        console.log(`LAN: http://YOUR_LOCAL_IP:${PORT}`);
+    });
 }
 
 start().catch(console.error);
