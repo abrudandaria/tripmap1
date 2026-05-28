@@ -18,13 +18,8 @@ const App = () => {
     const [trips, setTrips] = useState([]);
     const [stats, setStats] = useState(null);
     const [isOnline, setIsOnline] = useState(true);
-    const [isGenerating, setIsGenerating] = useState(false);
     const [page, setPage] = useState(1);
     const [totalPages, setTotalPages] = useState(1);
-    const [showModal, setShowModal] = useState(false);
-    const [editingId, setEditingId] = useState(null);
-    const [formData, setFormData] = useState({ dest: '', price: '', days: '', desc: '' });
-    const [selectedTrip, setSelectedTrip] = useState(null);
     const [filter, setFilter] = useState({ city: '', minPrice: '', maxPrice: '' });
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const loaderRef = useRef(null);
@@ -37,7 +32,6 @@ const App = () => {
 
     const [suspiciousUsers, setSuspiciousUsers] = useState([]);
     const [auditLogs, setAuditLogs] = useState([]);
-    const [activeAdminTab, setActiveAdminTab] = useState('logs');
 
     const sessionTimerRef = useRef(null);
 
@@ -50,7 +44,6 @@ const App = () => {
         setStats(null);
         setChatMessages([]);
         if (sessionTimerRef.current) clearTimeout(sessionTimerRef.current);
-        console.log('Session expired or user logged out');
     }, []);
 
     const startSessionTimer = useCallback(() => {
@@ -60,11 +53,6 @@ const App = () => {
             handleLogout();
         }, 2 * 60 * 60 * 1000);
     }, [handleLogout]);
-
-    const hasPermission = (perm) => {
-        if (user?.role === 'admin') return true;
-        return user?.permissions?.includes(perm);
-    };
 
     const gqlFetch = useCallback(async (query, variables = {}) => {
         const headers = { 'Content-Type': 'application/json' };
@@ -96,10 +84,7 @@ const App = () => {
                             }
                         }
                     `,
-                    variables: {
-                        username: loginForm.username,
-                        password: loginForm.password,
-                    },
+                    variables: { username: loginForm.username, password: loginForm.password },
                 }),
             });
             const data = await result.json();
@@ -194,13 +179,6 @@ const App = () => {
         } catch { }
     }, [user]);
 
-    const clearSuspicious = async (userId) => {
-        const headers = { 'Content-Type': 'application/json' };
-        if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-        await fetch(`${SERVER}/api/admin/suspicious/${userId}`, { method: 'DELETE', headers });
-        setSuspiciousUsers(prev => prev.filter(u => u.id !== userId));
-    };
-
     const fetchTrips = useCallback(async (isNextPage = false, targetPageManual = null, filterOverride = null) => {
         const targetPage = targetPageManual || (isNextPage ? page + 1 : page);
         const activeFilter = filterOverride !== null ? filterOverride : filter;
@@ -263,261 +241,90 @@ const App = () => {
         return () => observer.disconnect();
     }, [isLoadingMore, page, totalPages, isOnline, view, fetchTrips]);
 
-    const handleAction = async (method, data) => {
-        if (method === 'DELETE') {
-            if (!hasPermission('delete_trip')) return alert('No permission!');
-            try {
-                const result = await gqlFetch(
-                    `mutation DeleteTrip($id: ID!) { deleteTrip(id: $id) }`,
-                    { id: data.id }
-                );
-                if (result.errors) return alert(result.errors[0].message);
-                setShowModal(false);
-                fetchTrips(false, 1);
-                fetchStats();
-            } catch { setIsOnline(false); }
-            return;
-        }
-
-        if (editingId && !hasPermission('edit_trip')) return alert('No permission!');
-        if (!editingId && !hasPermission('create_trip')) return alert('No permission!');
-        if (!data.dest || data.price <= 0) return alert('Invalid data!');
-
-        try {
-            let result;
-            if (editingId) {
-                result = await gqlFetch(
-                    `mutation UpdateTrip($id: ID!, $dest: String!, $price: Float!, $days: Int!, $desc: String) {
-                        updateTrip(id: $id, dest: $dest, price: $price, days: $days, desc: $desc) { id }
-                    }`,
-                    { id: editingId, dest: data.dest, price: Number(data.price), days: Number(data.days), desc: data.desc || '' }
-                );
-            } else {
-                result = await gqlFetch(
-                    `mutation AddTrip($dest: String!, $price: Float!, $days: Int!, $desc: String) {
-                        addTrip(dest: $dest, price: $price, days: $days, desc: $desc) { id }
-                    }`,
-                    { dest: data.dest, price: Number(data.price), days: Number(data.days), desc: data.desc || '' }
-                );
-            }
-            if (result.errors) return alert(result.errors[0].message);
-            setShowModal(false);
-            fetchTrips(false, 1);
-            fetchStats();
-        } catch { setIsOnline(false); }
-    };
-
-    // ─── VIEW: LOGIN ───
+    // VIEW: LOGIN
     if (view === 'login') return (
         <div style={{ minHeight: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center', background: '#0a0a12', padding: '20px', boxSizing: 'border-box' }}>
             <div style={{ background: '#161625', padding: '30px 20px', borderRadius: '12px', border: '1px solid cyan', textAlign: 'center', width: '100%', maxWidth: '360px', boxSizing: 'border-box' }}>
                 <h2 style={{ color: 'cyan', marginBottom: '8px' }}>Trip Planner Engine</h2>
-                <p style={{ color: '#555', marginBottom: '24px', fontSize: '0.85rem' }}>
-                    v4.0 Bronze — {authMode === 'login' ? 'Secure Login' : 'Create Account'}
-                </p>
-                <input value={loginForm.username} onChange={e => setLoginForm({ ...loginForm, username: e.target.value })}
-                    placeholder="Username"
-                    style={{ width: '100%', padding: '12px', marginBottom: '10px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }} />
-                <input type="password" value={loginForm.password} onChange={e => setLoginForm({ ...loginForm, password: e.target.value })}
-                    onKeyDown={e => e.key === 'Enter' && (authMode === 'login' ? handleLogin() : handleRegister())}
-                    placeholder="Password"
-                    style={{ width: '100%', padding: '12px', marginBottom: '16px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }} />
+                <p style={{ color: '#555', marginBottom: '24px', fontSize: '0.85rem' }}>v4.0 Bronze — Secure Access</p>
+                <input value={loginForm.username} onChange={e => setLoginForm({ ...loginForm, username: e.target.value })} placeholder="Username" style={{ width: '100%', padding: '12px', marginBottom: '10px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }} />
+                <input type="password" value={loginForm.password} onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} onKeyDown={e => e.key === 'Enter' && handleLogin()} placeholder="Password" style={{ width: '100%', padding: '12px', marginBottom: '16px', background: '#0a0a12', border: '1px solid #333', color: 'white', boxSizing: 'border-box', borderRadius: '4px' }} />
                 {loginError && <p style={{ color: '#ff4d4d', marginBottom: '10px', fontSize: '0.85rem' }}>{loginError}</p>}
-                {successMessage && <p style={{ color: '#00ff88', marginBottom: '10px', fontSize: '0.85rem' }}>{successMessage}</p>}
-                {authMode === 'login'
-                    ? <button onClick={handleLogin} style={{ width: '100%', padding: '12px', background: 'cyan', border: 'none', fontWeight: 'bold', cursor: 'pointer', borderRadius: '4px', color: 'black' }}>LOGIN</button>
-                    : <button onClick={handleRegister} style={{ width: '100%', padding: '12px', background: '#00ff88', border: 'none', fontWeight: 'bold', cursor: 'pointer', borderRadius: '4px', color: 'black' }}>REGISTER</button>
-                }
-                <div style={{ marginTop: '15px' }}>
-                    <span onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setLoginError(''); setSuccessMessage(''); }}
-                        style={{ color: 'cyan', fontSize: '0.85rem', cursor: 'pointer', textDecoration: 'underline' }}>
-                        {authMode === 'login' ? "Don't have an account? Register" : "Already have an account? Login"}
-                    </span>
-                </div>
-                {authMode === 'login' && (
-                    <div style={{ marginTop: '20px', padding: '12px', background: '#0a0a12', borderRadius: '8px', textAlign: 'left' }}>
-                        <p style={{ color: '#555', fontSize: '0.75rem', margin: '0 0 6px 0' }}>Test accounts:</p>
-                        <p style={{ color: '#00ff88', fontSize: '0.75rem', margin: '2px 0' }}>admin / admin123 → Full access</p>
-                        <p style={{ color: '#aaa', fontSize: '0.75rem', margin: '2px 0' }}>user1 / user123 → View only</p>
-                    </div>
-                )}
+                <button onClick={handleLogin} style={{ width: '100%', padding: '12px', background: 'cyan', border: 'none', fontWeight: 'bold', cursor: 'pointer', borderRadius: '4px', color: 'black' }}>LOGIN</button>
             </div>
         </div>
     );
 
-    // ─── VIEW: DASHBOARD ───
+    // VIEW: DASHBOARD
     if (view === 'dashboard_main') return (
         <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', background: '#0a0a12', color: 'white', padding: '20px', boxSizing: 'border-box' }}>
-            {/* Injectare stiluri dinamice pentru clasa responsive-container */}
             <style>{`
-                .dashboard-cards {
-                    display: flex;
-                    gap: 20px;
-                    width: 100%;
-                    max-width: 700px;
-                    justify-content: center;
-                }
-                .dashboard-card {
-                    padding: 30px 20px;
-                    background: #161625;
-                    border-radius: 20px;
-                    cursor: pointer;
-                    text-align: center;
-                    flex: 1;
-                    box-sizing: border-box;
-                    transition: transform 0.2s;
-                }
-                .dashboard-card:hover { transform: scale(1.02); }
+                .dashboard-cards { display: flex; gap: 20px; width: 100%; max-width: 700px; justify-content: center; }
+                .dashboard-card { padding: 30px 20px; background: #161625; border-radius: 20px; cursor: pointer; text-align: center; flex: 1; box-sizing: border-box; transition: transform 0.2s; }
                 .card-manager { border: 2px solid cyan; }
                 .card-security { border: 2px solid #ff4d4d; background: #25161c !important; }
-                .user-info-text { text-align: center; color: #555; margin-bottom: 20px; line-height: 1.5; }
-                
                 @media (max-width: 768px) {
-                    .dashboard-cards {
-                        flex-direction: column;
-                        align-items: center;
-                    }
-                    .dashboard-card {
-                        width: 100%;
-                        max-width: 340px;
-                    }
+                    .dashboard-cards { flex-direction: column; align-items: center; }
+                    .dashboard-card { width: 100%; max-width: 340px; }
                 }
             `}</style>
-
-            <p className="user-info-text">
-                Logged in as <span style={{ color: 'cyan' }}>{user?.username}</span><br />
-                Role: <span style={{ color: user?.role === 'admin' ? '#ff4d4d' : '#00ff88' }}>{user?.role}</span><br />
-                <span style={{ color: '#444', fontSize: '0.75rem' }}>● Session expires in 2h</span>
-            </p>
-
+            <p style={{ textAlign: 'center', color: '#aaa', marginBottom: '20px' }}>Logged in as <span style={{ color: 'cyan' }}>{user?.username}</span></p>
             <div className="dashboard-cards">
                 <div onClick={() => setView('trip_planner')} className="dashboard-card card-manager">
-                    <h2 style={{ color: 'cyan', margin: 0, fontSize: '1.3rem' }}>TRIP MANAGER</h2>
-                    <p style={{ color: '#aaa', marginTop: '10px', fontSize: '0.85rem' }}>Console & Planning Engine</p>
+                    <h2 style={{ color: 'cyan', margin: 0 }}>TRIP MANAGER</h2>
                 </div>
                 {user?.role === 'admin' && (
-                    <div onClick={() => { setView('admin_panel'); fetchGoldAdminData(); }} className="dashboard-card card-security">
-                        <h2 style={{ color: '#ff4d4d', margin: 0, fontSize: '1.3rem' }}>SECURITY PANEL</h2>
-                        <p style={{ color: '#aaa', marginTop: '10px', fontSize: '0.85rem' }}>Audit Logs & Monitor</p>
+                    <div onClick={() => setView('admin_panel')} className="dashboard-card card-security">
+                        <h2 style={{ color: '#ff4d4d', margin: 0 }}>SECURITY PANEL</h2>
                     </div>
                 )}
             </div>
-
-            <button onClick={handleLogout}
-                style={{ background: '#222', color: '#ff4d4d', border: '1px solid #333', padding: '12px 30px', borderRadius: '4px', cursor: 'pointer', marginTop: '30px', fontWeight: 'bold' }}>
-                LOGOUT
-            </button>
+            <button onClick={handleLogout} style={{ background: '#222', color: '#ff4d4d', border: '1px solid #333', padding: '12px 30px', borderRadius: '4px', cursor: 'pointer', marginTop: '30px' }}>LOGOUT</button>
         </div>
     );
 
-    // ─── VIEW: ADMIN PANEL ───
+    // VIEW: ADMIN PANEL
     if (view === 'admin_panel') return (
-        <div style={{ padding: '20px', background: '#0a0a12', color: 'white', minHeight: '100vh', fontFamily: 'sans-serif', boxSizing: 'border-box' }}>
-            <style>{`
-                .admin-header { display: flex; justify-content: space-between; alignItems: center; border-bottom: 1px solid #ff4d4d; padding-bottom: 15px; margin-bottom: 20px; gap: 15px; }
-                .admin-stats { display: flex; gap: 15px; margin-bottom: 20px; }
-                @media (max-width: 600px) {
-                    .admin-header { flex-direction: column; text-align: center; }
-                    .admin-stats { flex-direction: column; }
-                }
-            `}</style>
-            <div className="admin-header">
-                <h1 style={{ margin: 0, color: '#ff4d4d', fontSize: '1.6rem' }}>Security Console</h1>
-                <div style={{ display: 'flex', gap: '10px' }}>
-                    <button onClick={fetchGoldAdminData} style={{ background: '#222', color: '#aaa', border: 'none', padding: '8px 15px', cursor: 'pointer', borderRadius: '4px' }}>REFRESH</button>
-                    <button onClick={() => setView('dashboard_main')} style={{ background: '#333', color: 'white', border: 'none', padding: '8px 15px', cursor: 'pointer', borderRadius: '4px' }}>BACK</button>
-                </div>
-            </div>
-
-            <div className="admin-stats">
-                <div style={{ background: '#1c1618', padding: '15px 20px', borderRadius: '8px', border: '1px solid #ff4d4d', flex: 1, textAlign: 'center' }}>
-                    <div style={{ color: '#ff4d4d', fontSize: '2rem', fontWeight: 'bold' }}>{suspiciousUsers.length}</div>
-                    <div style={{ color: '#aaa', fontSize: '0.85rem', marginTop: '4px' }}>Suspicious Accounts</div>
-                </div>
-                <div style={{ background: '#161c18', padding: '15px 20px', borderRadius: '8px', border: '1px solid #00ff88', flex: 1, textAlign: 'center' }}>
-                    <div style={{ color: '#00ff88', fontSize: '2rem', fontWeight: 'bold' }}>{auditLogs.length}</div>
-                    <div style={{ color: '#aaa', fontSize: '0.85rem', marginTop: '4px' }}>Audit Log Entries</div>
-                </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-                <button onClick={() => setActiveAdminTab('logs')} style={{ padding: '10px 15px', background: activeAdminTab === 'logs' ? '#ff4d4d' : '#161625', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem' }}>AUDIT LOGS</button>
-                <button onClick={() => setActiveAdminTab('suspicious')} style={{ padding: '10px 15px', background: activeAdminTab === 'suspicious' ? '#ff4d4d' : '#161625', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem' }}>SUSPICIOUS ({suspiciousUsers.length})</button>
-            </div>
-
-            <div style={{ background: '#161625', padding: '15px', borderRadius: '12px', border: '1px solid #333', overflowX: 'auto' }}>
-                {activeAdminTab === 'logs' ? (
-                    <div>
-                        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '500px' }}>
-                            <thead>
-                                <tr style={{ color: '#ff4d4d', borderBottom: '1px solid #333' }}>
-                                    <th style={{ padding: '8px' }}>USER</th>
-                                    <th>ROLE</th>
-                                    <th>ACTION</th>
-                                    <th>TIMESTAMP</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {auditLogs.length === 0 ? (
-                                    <tr><td colSpan="4" style={{ padding: '20px', color: '#555', textAlign: 'center' }}>No audit logs yet.</td></tr>
-                                ) : auditLogs.map(log => (
-                                    <tr key={log.id} style={{ borderBottom: '1px solid #222' }}>
-                                        <td style={{ padding: '8px', color: 'cyan', fontWeight: 'bold' }}>{log.userId}</td>
-                                        <td><span style={{ color: log.role === 'admin' ? '#ff4d4d' : '#00ff88', fontSize: '0.8rem' }}>{log.role}</span></td>
-                                        <td style={{ color: '#ddd' }}>{log.action}</td>
-                                        <td style={{ color: '#666', fontSize: '0.8rem' }}>{new Date(log.timestamp).toLocaleTimeString()}</td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                ) : (
-                    <div>
-                        {suspiciousUsers.length === 0 ? (
-                            <div style={{ padding: '40px', textAlign: 'center', color: '#666' }}>No suspicious users detected.</div>
-                        ) : (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '15px' }}>
-                                {suspiciousUsers.map(sus => (
-                                    <div key={sus.id} style={{ background: '#1c1618', border: '1px solid #ff4d4d', padding: '15px', borderRadius: '8px' }}>
-                                        <div style={{ fontSize: '1.1rem', fontWeight: 'bold', color: 'white' }}>{sus.username}</div>
-                                        <div style={{ fontSize: '0.75rem', color: '#666', margin: '5px 0 10px' }}>Flagged: {new Date(sus.updatedAt).toLocaleDateString()}</div>
-                                        <button onClick={() => clearSuspicious(sus.id)} style={{ background: 'none', border: '1px solid #00ff88', color: '#00ff88', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}>Clear Flag</button>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
+        <div style={{ padding: '20px', background: '#0a0a12', color: 'white', minHeight: '100vh' }}>
+            <button onClick={() => setView('dashboard_main')}>BACK</button>
+            <p>Security Panel Active.</p>
         </div>
     );
 
-    // ─── VIEW: TRIP PLANNER ───
+    // VIEW: TRIP PLANNER (MAIN)
     return (
-        <div style={{ padding: '15px', background: '#0a0a12', color: 'white', minHeight: '100vh', fontFamily: 'sans-serif', boxSizing: 'border-box' }}>
+        <div style={{ padding: '15px', background: '#0a0a12', color: 'white', minHeight: '100vh', boxSizing: 'border-box' }}>
             <style>{`
                 .planner-nav { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 15px; margin-bottom: 20px; flex-wrap: wrap; gap: 15px; }
                 .planner-stats-grid { display: flex; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; }
-                .filter-bar { display: flex; gap: 10px; margin-bottom: 15px; background: #161625; padding: 12px; borderRadius: 8px; flex-wrap: wrap; }
+                .filter-bar { display: flex; gap: 10px; margin-bottom: 15px; background: #161625; padding: 12px; border-radius: 8px; flex-wrap: wrap; }
                 .filter-bar input { flex: 1; min-width: 120px; padding: 8px; background: #0a0a12; border: 1px solid #333; color: white; border-radius: 4px; }
-                .main-layout { display: flex; gap: 20px; min-height: 400px; }
-                .chart-container-box { flex: 1; background: #161625; padding: 20px; borderRadius: 12px; display: flex; flex-direction: column; }
                 
-                @media (max-width: 850px) {
-                    .main-layout { flex-direction: column; }
+                .main-layout { display: flex; gap: 20px; }
+                .trips-list-box { flex: 2; background: #161625; padding: 15px; border-radius: 12px; overflow-Y: auto; max-height: 60vh; }
+                
+                /* FIX GRAFIC: Container cu înălțime explicită pe mobil */
+                .chart-container-box { flex: 1; background: #161625; padding: 20px; border-radius: 12px; min-height: 300px; display: flex; flex-direction: column; }
+                
+                /* FIX CHAT: z-index uriaș și fixare deasupra oricărui element */
+                .chat-window { position: fixed; bottom: 20px; right: 20px; width: 320px; height: 420px; background: #161625; border: 2px solid cyan; border-radius: 12px; display: flex; flex-direction: column; z-index: 999999 !important; box-shadow: 0 10px 30px rgba(0,0,0,0.7); }
+                
+                @media (max-width: 768px) {
+                    .main-layout { flex-direction: column; gap: 15px; }
                     .planner-nav { flex-direction: column; text-align: center; }
                     .filter-bar input { width: 100%; flex: none; }
+                    .chart-container-box { min-height: 260px; height: 260px; } /* Forțăm înălțimea pe mobil */
+                    .chat-window { right: 10px; bottom: 10px; left: 10px; width: auto; height: 70vh; }
                 }
             `}</style>
 
             <div className="planner-nav">
                 <h1 style={{ margin: 0, fontSize: '1.6rem' }}>Trip<span style={{ color: 'cyan' }}>Planner</span></h1>
-                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
-                    <span style={{ color: '#aaa', fontSize: '0.85rem' }}>
-                        👤 <span style={{ color: 'cyan' }}>{user?.username}</span>
-                    </span>
-                    <button onClick={() => setShowChat(!showChat)} style={{ background: '#161625', color: 'cyan', border: '1px solid cyan', padding: '6px 12px', cursor: 'pointer', borderRadius: '4px', fontSize: '0.85rem' }}>Chat</button>
-                    <button onClick={() => setView('dashboard_main')} style={{ background: '#333', color: 'white', border: 'none', padding: '6px 12px', cursor: 'pointer', borderRadius: '4px', fontSize: '0.85rem' }}>BACK</button>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                    <button onClick={() => setShowChat(!showChat)} style={{ background: '#161625', color: 'cyan', border: '1px solid cyan', padding: '8px 16px', cursor: 'pointer', borderRadius: '4px', fontWeight: 'bold' }}>
+                        {showChat ? 'Close Chat ✖' : 'Open Chat 💬'}
+                    </button>
+                    <button onClick={() => setView('dashboard_main')} style={{ background: '#333', color: 'white', border: 'none', padding: '8px 16px', cursor: 'pointer', borderRadius: '4px' }}>BACK</button>
                 </div>
             </div>
 
@@ -532,65 +339,59 @@ const App = () => {
                 </div>
             )}
 
-            {hasPermission('create_trip') && (
-                <div style={{ textAlign: 'center', marginBottom: '20px' }}>
-                    <button onClick={async () => {
-                        const action = isGenerating ? 'stop' : 'start';
-                        await gqlFetch(`mutation ToggleGen($action: String!) { toggleGenerator(action: $action) }`, { action });
-                        setIsGenerating(!isGenerating);
-                    }} style={{ background: isGenerating ? '#ff4d4d' : '#00ff88', border: 'none', padding: '10px 20px', borderRadius: '20px', fontWeight: 'bold', cursor: 'pointer', fontSize: '0.85rem' }}>
-                        {isGenerating ? 'STOP GENERATOR' : 'START LIVE DATA GENERATOR'}
-                    </button>
-                </div>
-            )}
-
             <div className="filter-bar">
                 <input value={filter.city} onChange={e => setFilter({ ...filter, city: e.target.value })} placeholder="City..." />
-                <input type="number" value={filter.minPrice} onChange={e => setFilter({ ...filter, minPrice: e.target.value })} placeholder="Min $" />
-                <input type="number" value={filter.maxPrice} onChange={e => setFilter({ ...filter, maxPrice: e.target.value })} placeholder="Max $" />
-                <div style={{ display: 'flex', gap: '5px', width: '100%', justifyContent: 'flex-end', marginTop: '5px' }}>
-                    <button onClick={() => fetchTrips(false, 1, filter)} style={{ padding: '8px 15px', background: 'cyan', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', color: 'black' }}>FILTER</button>
-                    <button onClick={() => { const c = { city: '', minPrice: '', maxPrice: '' }; setFilter(c); fetchTrips(false, 1, c); }} style={{ padding: '8px 15px', background: '#333', border: 'none', borderRadius: '4px', color: 'white', cursor: 'pointer' }}>CLEAR</button>
-                </div>
+                <button onClick={() => fetchTrips(false, 1, filter)} style={{ padding: '8px 15px', background: 'cyan', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', color: 'black' }}>FILTER</button>
             </div>
 
             <div className="main-layout">
-                {/* Partea Stângă: Listă călătorii */}
-                <div style={{ flex: 2, background: '#161625', padding: '15px', borderRadius: '12px', overflowY: 'auto', maxHeight: '60vh' }}>
+                <div className="trips-list-box">
                     <h3 style={{ margin: '0 0 15px 0', color: 'cyan' }}>Available Trips</h3>
-                    {trips.length === 0 ? (
-                        <p style={{ color: '#555' }}>No trips found.</p>
-                    ) : (
-                        trips.map(t => (
-                            <div key={t.id} style={{ padding: '12px', background: '#0a0a12', borderRadius: '8px', marginBottom: '10px', border: '1px solid #222' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                                    <b style={{ color: 'white' }}>{t.dest}</b>
-                                    <span style={{ color: '#00ff88' }}>${t.price}</span>
-                                </div>
-                                <div style={{ fontSize: '0.8rem', color: '#aaa', marginTop: '4px' }}>{t.days} Days — {t.desc}</div>
-                            </div>
-                        ))
-                    )}
-                    <div ref={loaderRef} style={{ height: '20px', textAlign: 'center', color: '#444', fontSize: '0.8rem' }}>
-                        {isLoadingMore ? 'Loading more...' : ''}
-                    </div>
+                    {trips.length === 0 ? <p style={{ color: '#555' }}>No trips found.</p> : trips.map(t => (
+                        <div key={t.id} style={{ padding: '12px', background: '#0a0a12', borderRadius: '8px', marginBottom: '10px', border: '1px solid #222' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><b>{t.dest}</b><span style={{ color: '#00ff88' }}>${t.price}</span></div>
+                        </div>
+                    ))}
+                    <div ref={loaderRef} style={{ height: '20px' }}></div>
                 </div>
 
-                {/* Partea Dreaptă: Grafic Recharts */}
                 <div className="chart-container-box">
                     <h3 style={{ margin: '0 0 15px 0', color: 'cyan' }}>Analytics</h3>
-                    <div style={{ width: '100%', flex: 1, minHeight: '200px' }}>
+                    <div style={{ width: '100%', flex: 1, minHeight: '150px' }}>
                         <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={trips.slice(0, 8)}>
-                                <XAxis dataKey="dest" stroke="#555" tick={{ fontSize: 10 }} />
-                                <YAxis stroke="#555" tick={{ fontSize: 10 }} />
+                            <BarChart data={trips.slice(0, 5)} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                                <XAxis dataKey="dest" stroke="#888" style={{ fontSize: '12px' }} />
+                                <YAxis stroke="#888" style={{ fontSize: '12px' }} />
                                 <Tooltip contentStyle={{ background: '#161625', border: '1px solid #333' }} />
-                                <Bar dataKey="price" fill="cyan" />
+                                <Bar dataKey="price" fill="cyan" radius={[4, 4, 0, 0]} />
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
                 </div>
             </div>
+
+            {/* LIVE CHAT POPUP */}
+            {showChat && (
+                <div className="chat-window">
+                    <div style={{ background: '#0a0a12', padding: '12px', borderBottom: '1px solid cyan', display: 'flex', justifyContent: 'space-between', borderTopLeftRadius: '10px', borderTopRightRadius: '10px' }}>
+                        <b style={{ color: 'cyan' }}>💬 Live Chat</b>
+                        <span onClick={() => setShowChat(false)} style={{ cursor: 'pointer', color: '#ff4d4d', fontWeight: 'bold', padding: '0 5px' }}>✖</span>
+                    </div>
+                    <div style={{ flex: 1, padding: '10px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', background: '#11111f' }}>
+                        {chatMessages.map((msg, idx) => (
+                            <div key={idx} style={{ background: msg.username === user?.username ? '#0f2027' : '#232526', padding: '8px 12px', borderRadius: '8px', maxWidth: '85%', alignSelf: msg.username === user?.username ? 'flex-end' : 'flex-start' }}>
+                                <div style={{ fontSize: '0.7rem', color: 'cyan', fontWeight: 'bold' }}>{msg.username}</div>
+                                <div style={{ fontSize: '0.85rem', marginTop: '2px', color: '#fff' }}>{msg.text}</div>
+                            </div>
+                        ))}
+                        <div ref={chatEndRef} />
+                    </div>
+                    <div style={{ padding: '10px', background: '#0a0a12', display: 'flex', gap: '5px', borderBottomLeftRadius: '10px', borderBottomRightRadius: '10px' }}>
+                        <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendMessage()} placeholder="Type a message..." style={{ flex: 1, padding: '10px', background: '#161625', border: '1px solid #333', color: 'white', borderRadius: '4px' }} />
+                        <button onClick={sendMessage} style={{ background: 'cyan', color: 'black', border: 'none', padding: '10px 15px', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer' }}>Send</button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
